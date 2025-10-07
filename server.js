@@ -319,13 +319,53 @@ app.post("/auth/forgot-password", (req, res) => {
     const resetLink = `${FRONTEND_URL}/reset-password?token=${token}`;
 
     if (useEmail) {
-      transporter.sendMail({
-        from: process.env.EMAIL_USER,
-        to: email,
-        subject: "Reset Password - PASEARCH",
-        html: `<p>Click to reset your password: 
-               <a href="${resetLink}">Reset Password</a> (expires in 15 minutes)</p>`,
-      });
+     transporter.sendMail({
+  from: process.env.EMAIL_USER,
+  to: email,
+  subject: "Reset Password - PASEARCH",
+  html: `
+    <div style="font-family: Arial, sans-serif; background-color: #f4f6f8; padding: 40px 0;">
+      <div style="max-width: 480px; margin: 0 auto; background: #ffffff; border-radius: 10px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+
+        <!-- Header -->
+        <div style="background-color: #1d4ed8; color: #ffffff; padding: 20px; text-align: center;">
+            <h2 style="margin: 0; font-size: 24px;">PASEARCH</h2>
+           <p style="margin: 4px 0 0; font-size: 14px;">Device Security & Tracking</p>
+        </div>
+        <!-- Body -->
+        <div style="padding: 30px; color: #333333;">
+          <h3 style="margin-top: 0;">Reset Your Password</h3>
+          <p style="font-size: 15px; line-height: 1.5;">
+            Hello, we received a request to reset your password for your PASEARCH account.<br/>
+            If you didn’t request this, please ignore this email.
+          </p>
+          <p style="text-align: center; margin: 30px 0;">
+            <a href="${process.env.FRONTEND_URL}/reset-password?token=${token}"
+              style="display: inline-block; background-color: #1d4ed8; color: #ffffff; text-decoration: none;
+                     padding: 12px 24px; border-radius: 6px; font-weight: bold; font-size: 16px;">
+              Reset Password
+            </a>
+          </p>
+          <p style="font-size: 14px; color: #555;">
+            This link will expire in 15 minutes for your security.
+          </p>
+          <p style="font-size: 13px; color: #888;">
+            Or copy this link into your browser:<br/>
+            <a href="${process.env.FRONTEND_URL}/reset-password?token=${token}" style="color: #1d4ed8;">
+              ${process.env.FRONTEND_URL}/reset-password?token=${token}
+            </a>
+          </p>
+        </div>
+
+        <!-- Footer -->
+        <div style="background-color: #f1f5f9; text-align: center; padding: 15px; font-size: 12px; color: #888;">
+          <p style="margin: 0;">© 2025 PASEARCH — All rights reserved</p>
+          <p style="margin: 4px 0 0;">Helping communities recover lost devices.</p>
+        </div>
+      </div>
+    </div>
+  `,
+});
     } else {
       console.log("ℹ️ Email disabled, reset link:", resetLink);
     }
