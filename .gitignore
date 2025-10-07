@@ -1,10 +1,7 @@
-# === Sensitive Files ===
+# Node modules and sensitive files
+node_modules/
 .env
 devices.db
-
-# === Node + Logs ===
-node_modules
-npm-debug.log
 uploads/
 
 # === System Files ===
