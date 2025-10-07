@@ -1,0 +1,12 @@
+# === Sensitive Files ===
+.env
+devices.db
+
+# === Node + Logs ===
+node_modules
+npm-debug.log
+uploads/
+
+# === System Files ===
+.DS_Store
+Thumbs.db
