@@ -13,6 +13,32 @@ const fs = require("fs");
 const { google } = require("googleapis");
 require("dotenv").config();
 
+// =====================
+// GOOGLE SHEETS HELPER
+// =====================
+async function logToGoogleSheet(dataRow) {
+  try {
+    const auth = new google.auth.GoogleAuth({
+      keyFile: process.env.GOOGLE_SERVICE_ACCOUNT_PATH,
+      scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+    });
+
+    const sheets = google.sheets({ version: "v4", auth });
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: process.env.GOOGLE_SHEET_ID,
+      range: "Sheet1!A1", // Make sure your first sheet is named 'Sheet1'
+      valueInputOption: "USER_ENTERED",
+      resource: {
+        values: [dataRow],
+      },
+    });
+
+    console.log("✅ Logged to Google Sheet:", dataRow);
+  } catch (err) {
+    console.error("❌ Failed to log to Google Sheet:", err.message);
+  }
+}
 // === CONFIG ===
 const DB_PATH = path.join(__dirname, "devices.db");
 const UPLOAD_DIR = path.join(__dirname, "uploads");
@@ -177,7 +203,29 @@ async function logSystemEvent({ email, role, event }) {
     new Date().toLocaleString(),
   ]);
 }
+async function logToGoogleSheet(dataRow) {
+  try {
+    const auth = new google.auth.GoogleAuth({
+      keyFile: process.env.GOOGLE_SERVICE_ACCOUNT_PATH,
+      scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+    });
 
+    const sheets = google.sheets({ version: "v4", auth });
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: process.env.GOOGLE_SHEET_ID,
+      range: "Sheet1!A1", // your first sheet name
+      valueInputOption: "USER_ENTERED",
+      resource: {
+        values: [dataRow],
+      },
+    });
+
+    console.log("✅ Logged to Google Sheet:", dataRow);
+  } catch (err) {
+    console.error("❌ Failed to log to Google Sheet:", err.message);
+  }
+}
 // =====================
 // EMAIL (optional)
 // =====================
@@ -270,10 +318,7 @@ app.post("/auth/login", (req, res) => {
       user.role = "admin";
     }
 
-    const token = jwt.sign(
-      { id: user.id, username: user.username, email, role: user.role },
-      JWT_SECRET,
-      { expiresIn: "7d" }
+    const token = jwt.sign({ id: rows[0].id }, JWT_SECRET, { expiresIn: "30d" });
     );
 
     await logSystemEvent({
@@ -463,6 +508,89 @@ app.get("/device/:imei", (req, res) => {
     if (!row) return res.status(404).json({ error: "Device not found" });
     res.json({ device: row });
   });
+});
+
+// =====================
+// REPORT DEVICE ENDPOINT
+// =====================
+app.post("/report-device", async (req, res) => {
+  const { imei, name, color, storage, location, reporterName, reporterEmail } = req.body;
+  const dateReported = new Date().toLocaleString();
+
+  try {
+    // Save to SQLite database
+    const db = new sqlite3.Database(DB_PATH);
+    db.run(
+      `INSERT INTO devices (imei, name, color, storage, location, reporterName, reporterEmail, dateReported)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [imei, name, color, storage, location, reporterName, reporterEmail, dateReported],
+      async function (err) {
+        if (err) {
+          console.error("DB insert error:", err);
+          res.status(500).json({ error: "Database error" });
+        } else {
+          // ✅ Log the new device report to Google Sheets
+          await logToGoogleSheet([
+            imei,
+            name,
+            color,
+            storage,
+            location,
+            reporterName,
+            reporterEmail,
+            dateReported,
+          ]);
+
+          res.json({ success: true, message: "Device reported successfully" });
+        }
+      }
+    );
+    db.close();
+  } catch (err) {
+    console.error("Report error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// =====================
+// TRACK DEVICE ENDPOINT
+// =====================
+app.post("/track-device", async (req, res) => {
+  const { imei, latitude, longitude, address, trackerName } = req.body;
+  const trackedAt = new Date().toLocaleString();
+
+  try {
+    // Save the location to the database
+    const db = new sqlite3.Database(DB_PATH);
+    db.run(
+      `INSERT INTO tracking (imei, latitude, longitude, address, trackerName, trackedAt)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [imei, latitude, longitude, address, trackerName, trackedAt],
+      async function (err) {
+        if (err) {
+          console.error("DB insert error:", err);
+          res.status(500).json({ error: "Database error" });
+        } else {
+          // ✅ Log the tracking event to Google Sheets
+          await logToGoogleSheet([
+            "TRACK", // event type
+            imei,
+            latitude,
+            longitude,
+            address,
+            trackerName,
+            trackedAt,
+          ]);
+
+          res.json({ success: true, message: "Device location updated successfully" });
+        }
+      }
+    );
+    db.close();
+  } catch (err) {
+    console.error("Track error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
 });
 
 // =====================
