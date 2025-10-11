@@ -17,6 +17,7 @@
     "jsonwebtoken": "^9.0.2",
     "multer": "^2.0.2",
     "nodemailer": "^7.0.9",
+    "openai": "^6.3.0",
     "sqlite3": "^5.1.7",
     "twilio": "^5.10.2"
   },
