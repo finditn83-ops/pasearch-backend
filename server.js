@@ -18,14 +18,31 @@ const DB_PATH = path.join(__dirname, "devices.db");
 const UPLOAD_DIR = path.join(__dirname, "uploads");
 const JWT_SECRET = process.env.JWT_SECRET || "dev_secret";
 const PORT = process.env.PORT || 5000;
+
+// Allow local dev + your Vercel domain(s)
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
+const ADDITIONAL_ORIGINS = (process.env.CORS_EXTRA_ORIGINS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+// e.g. set CORS_EXTRA_ORIGINS="https://pasearch-frontend.vercel.app,https://*.vercel.app"
+
 const ADMIN_EMAIL = "finditn83@gmail.com";
 
 // === APP INIT ===
 const app = express();
 app.use(
   cors({
-    origin: FRONTEND_URL,
+    origin: (origin, cb) => {
+      const allowed = [FRONTEND_URL, ...ADDITIONAL_ORIGINS];
+      // allow same-origin tools like curl/postman with no Origin
+      if (!origin) return cb(null, true);
+      const ok =
+        allowed.includes(origin) ||
+        // allow vercel previews like https://pasearch-frontend-git-main-...vercel.app
+        /\.vercel\.app$/.test(new URL(origin).hostname);
+      return cb(ok ? null : new Error("CORS blocked"), ok);
+    },
     credentials: true,
   })
 );
@@ -34,7 +51,9 @@ app.use(express.urlencoded({ extended: true }));
 app.use("/uploads", express.static(UPLOAD_DIR));
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
-// === MULTER (uploads) ===
+// =====================
+// MULTER (uploads)
+// =====================
 const storage = multer.diskStorage({
   destination: (_, __, cb) => cb(null, UPLOAD_DIR),
   filename: (_, file, cb) =>
@@ -42,7 +61,9 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
-// === DATABASE ===
+// =====================
+// DATABASE
+// =====================
 const db = new sqlite3.Database(DB_PATH, (err) => {
   if (err) console.error("❌ DB error:", err.message);
   else console.log("✅ Connected to SQLite database.");
@@ -79,7 +100,6 @@ db.serialize(() => {
     FOREIGN KEY(user_id) REFERENCES users(id)
   )`);
 
-  // Optional useful index
   db.run(`CREATE INDEX IF NOT EXISTS idx_devices_imei ON devices(imei)`);
 });
 
@@ -158,7 +178,9 @@ async function logSystemEvent({ email, role, event }) {
   ]);
 }
 
-// === EMAIL (optional) ===
+// =====================
+// EMAIL (optional)
+// =====================
 const useEmail = !!process.env.EMAIL_USER && !!process.env.EMAIL_PASS;
 const transporter = useEmail
   ? nodemailer.createTransport({
@@ -182,7 +204,7 @@ app.get("/", (_, res) =>
 );
 
 app.get("/healthz", (_, res) => {
-  db.get("SELECT 1 as ok", [], (err, row) => {
+  db.get("SELECT 1 as ok", [], (err) => {
     if (err) return res.status(500).json({ ok: false, db: "down" });
     res.json({ ok: true, db: "up", time: new Date().toISOString() });
   });
@@ -276,19 +298,15 @@ app.post("/auth/update-password", (req, res) => {
       return res.status(400).json({ error: "Incorrect password" });
 
     const hashed = bcrypt.hashSync(newPassword, 10);
-    db.run(
-      "UPDATE users SET password=? WHERE email=?",
-      [hashed, email],
-      (e2) => {
-        if (e2) return res.status(500).json({ error: "Update failed" });
-        logPasswordEvent({
-          email,
-          action: "User changed own password",
-          actor: email,
-        });
-        res.json({ message: "Password updated successfully" });
-      }
-    );
+    db.run("UPDATE users SET password=? WHERE email=?", [hashed, email], (e2) => {
+      if (e2) return res.status(500).json({ error: "Update failed" });
+      logPasswordEvent({
+        email,
+        action: "User changed own password",
+        actor: email,
+      });
+      res.json({ message: "Password updated successfully" });
+    });
   });
 });
 
@@ -364,19 +382,15 @@ app.post("/admin/reset-user", (req, res) => {
       return res.status(403).json({ error: "Admins only" });
 
     const hashed = bcrypt.hashSync(new_password, 10);
-    db.run(
-      "UPDATE users SET password=? WHERE email=?",
-      [hashed, email],
-      (err) => {
-        if (err) return res.status(500).json({ error: "DB error" });
-        logPasswordEvent({
-          email,
-          action: "Admin reset user password",
-          actor: decoded.email,
-        });
-        res.json({ ok: true, message: "User password reset by admin." });
-      }
-    );
+    db.run("UPDATE users SET password=? WHERE email=?", [hashed, email], (err) => {
+      if (err) return res.status(500).json({ error: "DB error" });
+      logPasswordEvent({
+        email,
+        action: "Admin reset user password",
+        actor: decoded.email,
+      });
+      res.json({ ok: true, message: "User password reset by admin." });
+    });
   } catch {
     res.status(401).json({ error: "Invalid token" });
   }
@@ -400,16 +414,14 @@ app.post(
       reporter_email,
     } = req.body;
 
-    const proof_path = req.files?.proof_path
-      ? req.files.proof_path[0].path
-      : null;
+    const proof_path = req.files?.proof_path ? req.files.proof_path[0].path : null;
     const police_path = req.files?.police_report_path
       ? req.files.police_report_path[0].path
       : null;
 
     db.run(
       `INSERT INTO devices 
-        (user_id, device_category, device_type, imei, color, location_area, lost_type, proof_path, police_report_path, lost_datetime, other_details) 
+        (user_id, device_category, device_type, imei, color, location_area, lost_type, proof_path, police_report_path, lost_datetime, other_details)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         user_id || null,
@@ -427,9 +439,7 @@ app.post(
       function (err) {
         if (err) {
           console.error("Device insert error:", err.message);
-          return res
-            .status(500)
-            .json({ error: "Failed to report device" });
+          return res.status(500).json({ error: "Failed to report device" });
         }
         logDevice({
           device_category,
@@ -453,6 +463,63 @@ app.get("/device/:imei", (req, res) => {
     if (!row) return res.status(404).json({ error: "Device not found" });
     res.json({ device: row });
   });
+});
+
+// =====================
+// 🧠 OpenAI ASSISTANT (secure backend call)
+// =====================
+// No SDK import needed; Node 18+ has global fetch. Set OPENAI_API_KEY in Render.
+app.post("/api/ask-ai", async (req, res) => {
+  try {
+    const { prompt, memory } = req.body;
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ error: "OpenAI API key not configured" });
+    }
+
+    const body = {
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content: `
+You are PasearchAI — a privacy-focused assistant integrated into the Pasearch platform.
+Help users report, track  and recover devices responsibly.
+NEVER reveal private data or violate cyber laws.
+Be concise, friendly and helpful.
+Use provided memory only for personalization:\n${JSON.stringify(memory || {}, null, 2)}
+          `,
+        },
+        { role: "user", content: prompt || "" },
+      ],
+      max_tokens: 250,
+    };
+
+    const r = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!r.ok) {
+      const t = await r.text();
+      console.error("OpenAI error:", r.status, t);
+      return res.status(502).json({ error: "OpenAI upstream error" });
+    }
+
+    const data = await r.json();
+    const reply =
+      data?.choices?.[0]?.message?.content ||
+      "Sorry — I couldn’t generate a response.";
+
+    res.json({ reply });
+  } catch (err) {
+    console.error("AI route error:", err);
+    res.status(500).json({ error: "AI request failed" });
+  }
 });
 
 // 404 Handler
