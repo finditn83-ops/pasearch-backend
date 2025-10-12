@@ -1,12 +1,16 @@
 {
   "name": "device-tracker-backend",
   "version": "1.0.0",
-  "main": "index.js",
+  "description": "Device Tracker Backend API (Express + SQLite + Google Sheets)",
+  "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server.js",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "deploy-backend": "curl -X POST https://api.render.com/deploy/srv-d3ig4qbe5dus73945st0?key=L0s01AirKW8",
+    "deploy-frontend": "curl -X POST https://api.vercel.com/v1/integrations/deploy/prj_1tR89sWb8SHMIrtidx2Tc8gchxIs/zDK6EItgCD",
+    "deploy-all": "npm run deploy-backend && npm run deploy-frontend"
   },
-  "keywords": [],
-  "author": "",
+  "author": "Finditn",
   "license": "ISC",
   "dependencies": {
     "bcryptjs": "^3.0.2",
@@ -20,6 +24,5 @@
     "openai": "^6.3.0",
     "sqlite3": "^5.1.7",
     "twilio": "^5.10.2"
-  },
-  "description": ""
+  }
 }

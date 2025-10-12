@@ -305,12 +305,68 @@ app.post("/auth/register", (req, res) => {
   );
 });
 
-// Login + SystemLog
-app.post("/auth/login", (req, res) => {
-  const { email, password } = req.body;
-  db.get("SELECT * FROM users WHERE email = ?", [email], async (err, user) => {
-    if (err || !user || !bcrypt.compareSync(password, user.password))
-      return res.status(400).json({ error: "Invalid credentials" });
+// ==============================
+// ✅ LOGIN + SYSTEM LOG (Fixed)
+// ==============================
+app.post("/auth/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({ error: "Email and password are required" });
+    }
+
+    // 🔍 Find user by email
+    db.get("SELECT * FROM users WHERE email = ?", [email], async (err, user) => {
+      if (err) {
+        console.error("Database error:", err);
+        return res.status(500).json({ error: "Internal server error" });
+      }
+
+      if (!user) {
+        return res.status(401).json({ error: "Invalid email or password" });
+      }
+
+      // 🧩 Compare hashed password correctly
+      const isMatch = await bcrypt.compare(password, user.password);
+      if (!isMatch) {
+        return res.status(401).json({ error: "Invalid email or password" });
+      }
+
+      // 🔐 Generate JWT token (valid for 24h)
+      const token = jwt.sign(
+        { id: user.id, role: user.role, email: user.email },
+        JWT_SECRET,
+        { expiresIn: "1d" }
+      );
+
+      // 🗓️ Optional System Log (insert login activity)
+      const timestamp = new Date().toISOString();
+      db.run(
+        "INSERT INTO system_logs (user_id, action, timestamp) VALUES (?, ?, ?)",
+        [user.id, "User Login", timestamp],
+        (logErr) => {
+          if (logErr) console.error("System log error:", logErr);
+        }
+      );
+
+      // ✅ Return user data + token
+      res.json({
+        message: "Login successful",
+        token,
+        user: {
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+        },
+      });
+    });
+  } catch (error) {
+    console.error("Unexpected login error:", error);
+    res.status(500).json({ error: "Something went wrong. Please try again." });
+  }
+});
 
     // auto-upgrade admin
     if (user.email === ADMIN_EMAIL && user.role !== "admin") {
