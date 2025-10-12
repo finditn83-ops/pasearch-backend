@@ -14,58 +14,26 @@ const { google } = require("googleapis");
 require("dotenv").config();
 
 // =====================
-// GOOGLE SHEETS HELPER
+// CONFIGURATION
 // =====================
-async function logToGoogleSheet(dataRow) {
-  try {
-    const auth = new google.auth.GoogleAuth({
-      keyFile: process.env.GOOGLE_SERVICE_ACCOUNT_PATH,
-      scopes: ["https://www.googleapis.com/auth/spreadsheets"],
-    });
-
-    const sheets = google.sheets({ version: "v4", auth });
-
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: process.env.GOOGLE_SHEET_ID,
-      range: "Sheet1!A1", // Make sure your first sheet is named 'Sheet1'
-      valueInputOption: "USER_ENTERED",
-      resource: {
-        values: [dataRow],
-      },
-    });
-
-    console.log("✅ Logged to Google Sheet:", dataRow);
-  } catch (err) {
-    console.error("❌ Failed to log to Google Sheet:", err.message);
-  }
-}
-// === CONFIG ===
 const DB_PATH = path.join(__dirname, "devices.db");
 const UPLOAD_DIR = path.join(__dirname, "uploads");
 const JWT_SECRET = process.env.JWT_SECRET || "dev_secret";
 const PORT = process.env.PORT || 5000;
-
-// Allow local dev + your Vercel domain(s)
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
-const ADDITIONAL_ORIGINS = (process.env.CORS_EXTRA_ORIGINS || "")
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
-// e.g. set CORS_EXTRA_ORIGINS="https://pasearch-frontend.vercel.app,https://*.vercel.app"
-
 const ADMIN_EMAIL = "finditn83@gmail.com";
 
-// === APP INIT ===
+// =====================
+// INITIALIZE EXPRESS
+// =====================
 const app = express();
 app.use(
   cors({
     origin: (origin, cb) => {
-      const allowed = [FRONTEND_URL, ...ADDITIONAL_ORIGINS];
-      // allow same-origin tools like curl/postman with no Origin
+      const allowed = [FRONTEND_URL];
       if (!origin) return cb(null, true);
       const ok =
         allowed.includes(origin) ||
-        // allow vercel previews like https://pasearch-frontend-git-main-...vercel.app
         /\.vercel\.app$/.test(new URL(origin).hostname);
       return cb(ok ? null : new Error("CORS blocked"), ok);
     },
@@ -74,11 +42,11 @@ app.use(
 );
 app.use(express.json({ limit: "5mb" }));
 app.use(express.urlencoded({ extended: true }));
-app.use("/uploads", express.static(UPLOAD_DIR));
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+app.use("/uploads", express.static(UPLOAD_DIR));
 
 // =====================
-// MULTER (uploads)
+// MULTER SETUP
 // =====================
 const storage = multer.diskStorage({
   destination: (_, __, cb) => cb(null, UPLOAD_DIR),
@@ -126,11 +94,21 @@ db.serialize(() => {
     FOREIGN KEY(user_id) REFERENCES users(id)
   )`);
 
+  db.run(`CREATE TABLE IF NOT EXISTS tracking (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    imei TEXT,
+    latitude TEXT,
+    longitude TEXT,
+    address TEXT,
+    trackerName TEXT,
+    trackedAt TEXT
+  )`);
+
   db.run(`CREATE INDEX IF NOT EXISTS idx_devices_imei ON devices(imei)`);
 });
 
 // =====================
-// GOOGLE SHEETS (SAFE)
+// GOOGLE SHEETS HELPER
 // =====================
 const SHEET_ID = process.env.GOOGLE_SHEET_ID || "";
 let sheetsClient = null;
@@ -140,14 +118,12 @@ let sheetsClient = null;
     const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
     if (!raw) throw new Error("Missing GOOGLE_SERVICE_ACCOUNT_JSON");
     const serviceAccount = JSON.parse(raw);
-
     const auth = new google.auth.GoogleAuth({
       credentials: serviceAccount,
       scopes: ["https://www.googleapis.com/auth/spreadsheets"],
     });
-
     sheetsClient = google.sheets({ version: "v4", auth });
-    console.log("✅ Google Sheets connected (env-based credentials)");
+    console.log("✅ Google Sheets connected");
   } catch (err) {
     console.warn("⚠️ Sheets disabled:", err.message);
   }
@@ -203,31 +179,9 @@ async function logSystemEvent({ email, role, event }) {
     new Date().toLocaleString(),
   ]);
 }
-async function logToGoogleSheet(dataRow) {
-  try {
-    const auth = new google.auth.GoogleAuth({
-      keyFile: process.env.GOOGLE_SERVICE_ACCOUNT_PATH,
-      scopes: ["https://www.googleapis.com/auth/spreadsheets"],
-    });
 
-    const sheets = google.sheets({ version: "v4", auth });
-
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: process.env.GOOGLE_SHEET_ID,
-      range: "Sheet1!A1", // your first sheet name
-      valueInputOption: "USER_ENTERED",
-      resource: {
-        values: [dataRow],
-      },
-    });
-
-    console.log("✅ Logged to Google Sheet:", dataRow);
-  } catch (err) {
-    console.error("❌ Failed to log to Google Sheet:", err.message);
-  }
-}
 // =====================
-// EMAIL (optional)
+// EMAIL SETUP
 // =====================
 const useEmail = !!process.env.EMAIL_USER && !!process.env.EMAIL_PASS;
 const transporter = useEmail
@@ -241,7 +195,7 @@ const transporter = useEmail
 // ROUTES
 // =====================
 
-// Health
+// Health Check
 app.get("/", (_, res) =>
   res.json({
     ok: true,
@@ -251,14 +205,9 @@ app.get("/", (_, res) =>
   })
 );
 
-app.get("/healthz", (_, res) => {
-  db.get("SELECT 1 as ok", [], (err) => {
-    if (err) return res.status(500).json({ ok: false, db: "down" });
-    res.json({ ok: true, db: "up", time: new Date().toISOString() });
-  });
-});
-
-// Register
+// ==============================
+// ✅ REGISTER
+// ==============================
 app.post("/auth/register", (req, res) => {
   const { username, email, phone, password, role } = req.body;
   if (!username || !email || !password)
@@ -283,8 +232,8 @@ app.post("/auth/register", (req, res) => {
         { expiresIn: "7d" }
       );
 
-      // Logs
       logUser({ username, email, phone, role: userRole });
+
       if (useEmail) {
         transporter
           .sendMail({
@@ -306,41 +255,33 @@ app.post("/auth/register", (req, res) => {
 });
 
 // ==============================
-// ✅ LOGIN + SYSTEM LOG (Fixed)
+// ✅ LOGIN (fixed & cleaned)
 // ==============================
 app.post("/auth/login", async (req, res) => {
   try {
     const { email, password } = req.body;
+    if (!email || !password)
+      return res.status(400).json({ error: "Email and password required" });
 
-    if (!email || !password) {
-      return res.status(400).json({ error: "Email and password are required" });
-    }
-
-    // 🔍 Find user by email
     db.get("SELECT * FROM users WHERE email = ?", [email], async (err, user) => {
-      if (err) {
-        console.error("Database error:", err);
-        return res.status(500).json({ error: "Internal server error" });
-      }
+      if (err) return res.status(500).json({ error: "Database error" });
+      if (!user) return res.status(401).json({ error: "Invalid credentials" });
 
-      if (!user) {
-        return res.status(401).json({ error: "Invalid email or password" });
-      }
-
-      // 🧩 Compare hashed password correctly
       const isMatch = await bcrypt.compare(password, user.password);
-      if (!isMatch) {
-        return res.status(401).json({ error: "Invalid email or password" });
+      if (!isMatch)
+        return res.status(401).json({ error: "Invalid credentials" });
+
+      if (user.email === ADMIN_EMAIL && user.role !== "admin") {
+        db.run("UPDATE users SET role='admin' WHERE email=?", [email]);
+        user.role = "admin";
       }
 
-      // 🔐 Generate JWT token (valid for 24h)
       const token = jwt.sign(
         { id: user.id, role: user.role, email: user.email },
         JWT_SECRET,
-        { expiresIn: "1d" }
+        { expiresIn: "7d" }
       );
 
-      // 🗓️ Optional System Log (insert login activity)
       const timestamp = new Date().toISOString();
       db.run(
         "INSERT INTO system_logs (user_id, action, timestamp) VALUES (?, ?, ?)",
@@ -350,44 +291,32 @@ app.post("/auth/login", async (req, res) => {
         }
       );
 
-      // ✅ Return user data + token
+      await logSystemEvent({
+        email: user.email,
+        role: user.role,
+        event: "Login Successful",
+      });
+
       res.json({
         message: "Login successful",
         token,
         user: {
           id: user.id,
-          name: user.name,
+          username: user.username,
           email: user.email,
           role: user.role,
         },
       });
     });
   } catch (error) {
-    console.error("Unexpected login error:", error);
-    res.status(500).json({ error: "Something went wrong. Please try again." });
+    console.error("Login error:", error);
+    res.status(500).json({ error: "Server error" });
   }
 });
 
-    // auto-upgrade admin
-    if (user.email === ADMIN_EMAIL && user.role !== "admin") {
-      db.run("UPDATE users SET role='admin' WHERE email=?", [email]);
-      user.role = "admin";
-    }
-
-    const token = jwt.sign({ id: rows[0].id }, JWT_SECRET, { expiresIn: "30d" });
-    );
-
-    await logSystemEvent({
-      email,
-      role: user.role,
-      event: "Login Successful",
-    });
-
-    res.json({ message: "Login successful", token, user });
-  });
-});
-
-// Update Password
+// ==============================
+// ✅ UPDATE PASSWORD
+// ==============================
 app.post("/auth/update-password", (req, res) => {
   const { email, currentPassword, newPassword } = req.body;
   if (!email || !currentPassword || !newPassword)
@@ -401,103 +330,21 @@ app.post("/auth/update-password", (req, res) => {
     const hashed = bcrypt.hashSync(newPassword, 10);
     db.run("UPDATE users SET password=? WHERE email=?", [hashed, email], (e2) => {
       if (e2) return res.status(500).json({ error: "Update failed" });
+
       logPasswordEvent({
         email,
         action: "User changed own password",
         actor: email,
       });
+
       res.json({ message: "Password updated successfully" });
     });
   });
 });
 
-// Forgot Password (email reset link)
-app.post("/auth/forgot-password", (req, res) => {
-  const { email } = req.body;
-  if (!email) return res.status(400).json({ error: "Email required" });
-
-  const token = Math.random().toString(36).slice(2);
-  const expires = Date.now() + 15 * 60 * 1000;
-
-  db.run(
-    "UPDATE users SET reset_token=?, reset_expires=? WHERE email=?",
-    [token, expires, email],
-    (err) => {
-      if (err) return res.status(500).json({ error: "DB error" });
-
-      const link = `${FRONTEND_URL}/reset-password?token=${token}`;
-      if (useEmail) {
-        transporter
-          .sendMail({
-            from: process.env.EMAIL_USER,
-            to: email,
-            subject: "Reset Password - PASEARCH",
-            html: `<a href="${link}">${link}</a>`,
-          })
-          .catch((e) => console.warn("Email send failed:", e.message));
-      } else {
-        console.log("ℹ️ Email disabled, reset link:", link);
-      }
-
-      res.json({ ok: true, message: "Password reset link sent." });
-    }
-  );
-});
-
-// Reset Password Confirm
-app.post("/auth/reset-password", (req, res) => {
-  const { token, new_password } = req.body;
-  if (!token || !new_password)
-    return res.status(400).json({ error: "Token and new_password required" });
-
-  const hashed = bcrypt.hashSync(new_password, 10);
-  db.get("SELECT * FROM users WHERE reset_token=?", [token], (err, row) => {
-    if (err || !row || Date.now() > row.reset_expires)
-      return res.status(400).json({ error: "Invalid or expired token" });
-
-    db.run(
-      "UPDATE users SET password=?, reset_token=NULL, reset_expires=NULL WHERE id=?",
-      [hashed, row.id],
-      (uErr) => {
-        if (uErr) return res.status(500).json({ error: "DB error" });
-        logPasswordEvent({
-          email: row.email,
-          action: "Password reset via token",
-          actor: row.email,
-        });
-        res.json({ ok: true, message: "Password reset successful" });
-      }
-    );
-  });
-});
-
-// Admin Reset Password
-app.post("/admin/reset-user", (req, res) => {
-  const { email, new_password } = req.body;
-  const authHeader = req.headers.authorization;
-  if (!authHeader) return res.status(401).json({ error: "Missing token" });
-
-  try {
-    const decoded = jwt.verify(authHeader.split(" ")[1], JWT_SECRET);
-    if (decoded.role !== "admin")
-      return res.status(403).json({ error: "Admins only" });
-
-    const hashed = bcrypt.hashSync(new_password, 10);
-    db.run("UPDATE users SET password=? WHERE email=?", [hashed, email], (err) => {
-      if (err) return res.status(500).json({ error: "DB error" });
-      logPasswordEvent({
-        email,
-        action: "Admin reset user password",
-        actor: decoded.email,
-      });
-      res.json({ ok: true, message: "User password reset by admin." });
-    });
-  } catch {
-    res.status(401).json({ error: "Invalid token" });
-  }
-});
-
-// Report Device (uploads + Sheets)
+// ==============================
+// ✅ REPORT DEVICE
+// ==============================
 app.post(
   "/report-device",
   upload.fields([{ name: "proof_path" }, { name: "police_report_path" }]),
@@ -515,14 +362,16 @@ app.post(
       reporter_email,
     } = req.body;
 
-    const proof_path = req.files?.proof_path ? req.files.proof_path[0].path : null;
+    const proof_path = req.files?.proof_path
+      ? req.files.proof_path[0].path
+      : null;
     const police_path = req.files?.police_report_path
       ? req.files.police_report_path[0].path
       : null;
 
     db.run(
       `INSERT INTO devices 
-        (user_id, device_category, device_type, imei, color, location_area, lost_type, proof_path, police_report_path, lost_datetime, other_details)
+       (user_id, device_category, device_type, imei, color, location_area, lost_type, proof_path, police_report_path, lost_datetime, other_details)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         user_id || null,
@@ -556,103 +405,38 @@ app.post(
   }
 );
 
-// Lookup device by IMEI (useful for police/admin)
-app.get("/device/:imei", (req, res) => {
-  const { imei } = req.params;
-  db.get("SELECT * FROM devices WHERE imei = ?", [imei], (err, row) => {
-    if (err) return res.status(500).json({ error: "DB error" });
-    if (!row) return res.status(404).json({ error: "Device not found" });
-    res.json({ device: row });
-  });
-});
-
-// =====================
-// REPORT DEVICE ENDPOINT
-// =====================
-app.post("/report-device", async (req, res) => {
-  const { imei, name, color, storage, location, reporterName, reporterEmail } = req.body;
-  const dateReported = new Date().toLocaleString();
-
-  try {
-    // Save to SQLite database
-    const db = new sqlite3.Database(DB_PATH);
-    db.run(
-      `INSERT INTO devices (imei, name, color, storage, location, reporterName, reporterEmail, dateReported)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [imei, name, color, storage, location, reporterName, reporterEmail, dateReported],
-      async function (err) {
-        if (err) {
-          console.error("DB insert error:", err);
-          res.status(500).json({ error: "Database error" });
-        } else {
-          // ✅ Log the new device report to Google Sheets
-          await logToGoogleSheet([
-            imei,
-            name,
-            color,
-            storage,
-            location,
-            reporterName,
-            reporterEmail,
-            dateReported,
-          ]);
-
-          res.json({ success: true, message: "Device reported successfully" });
-        }
-      }
-    );
-    db.close();
-  } catch (err) {
-    console.error("Report error:", err);
-    res.status(500).json({ error: "Server error" });
-  }
-});
-
-// =====================
-// TRACK DEVICE ENDPOINT
-// =====================
+// ==============================
+// ✅ TRACK DEVICE
+// ==============================
 app.post("/track-device", async (req, res) => {
   const { imei, latitude, longitude, address, trackerName } = req.body;
   const trackedAt = new Date().toLocaleString();
 
-  try {
-    // Save the location to the database
-    const db = new sqlite3.Database(DB_PATH);
-    db.run(
-      `INSERT INTO tracking (imei, latitude, longitude, address, trackerName, trackedAt)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [imei, latitude, longitude, address, trackerName, trackedAt],
-      async function (err) {
-        if (err) {
-          console.error("DB insert error:", err);
-          res.status(500).json({ error: "Database error" });
-        } else {
-          // ✅ Log the tracking event to Google Sheets
-          await logToGoogleSheet([
-            "TRACK", // event type
-            imei,
-            latitude,
-            longitude,
-            address,
-            trackerName,
-            trackedAt,
-          ]);
-
-          res.json({ success: true, message: "Device location updated successfully" });
-        }
+  db.run(
+    `INSERT INTO tracking (imei, latitude, longitude, address, trackerName, trackedAt)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [imei, latitude, longitude, address, trackerName, trackedAt],
+    async function (err) {
+      if (err) {
+        console.error("DB insert error:", err);
+        return res.status(500).json({ error: "Database error" });
       }
-    );
-    db.close();
-  } catch (err) {
-    console.error("Track error:", err);
-    res.status(500).json({ error: "Server error" });
-  }
+      await appendToSheet("Tracking", [
+        imei,
+        latitude,
+        longitude,
+        address,
+        trackerName,
+        trackedAt,
+      ]);
+      res.json({ success: true, message: "Device location updated successfully" });
+    }
+  );
 });
 
 // =====================
-// 🧠 OpenAI ASSISTANT (secure backend call)
+// 🧠 OPENAI ASSISTANT
 // =====================
-// No SDK import needed; Node 18+ has global fetch. Set OPENAI_API_KEY in Render.
 app.post("/api/ask-ai", async (req, res) => {
   try {
     const { prompt, memory } = req.body;
@@ -666,13 +450,7 @@ app.post("/api/ask-ai", async (req, res) => {
       messages: [
         {
           role: "system",
-          content: `
-You are PasearchAI — a privacy-focused assistant integrated into the Pasearch platform.
-Help users report, track  and recover devices responsibly.
-NEVER reveal private data or violate cyber laws.
-Be concise, friendly and helpful.
-Use provided memory only for personalization:\n${JSON.stringify(memory || {}, null, 2)}
-          `,
+          content: `You are PasearchAI — a privacy-focused assistant integrated into the Pasearch platform. Help users report, track and recover devices responsibly.`,
         },
         { role: "user", content: prompt || "" },
       ],
@@ -698,7 +476,6 @@ Use provided memory only for personalization:\n${JSON.stringify(memory || {}, nu
     const reply =
       data?.choices?.[0]?.message?.content ||
       "Sorry — I couldn’t generate a response.";
-
     res.json({ reply });
   } catch (err) {
     console.error("AI route error:", err);
@@ -706,10 +483,11 @@ Use provided memory only for personalization:\n${JSON.stringify(memory || {}, nu
   }
 });
 
-// 404 Handler
+// =====================
+// 404 HANDLER + SERVER START
+// =====================
 app.use((_, res) => res.status(404).json({ error: "Route not found" }));
 
-// Start Server
 app.listen(PORT, "0.0.0.0", () =>
   console.log(`🚀 PASEARCH backend running on http://localhost:${PORT}`)
 );
