@@ -20,30 +20,65 @@ const DB_PATH = path.join(__dirname, "devices.db");
 const UPLOAD_DIR = path.join(__dirname, "uploads");
 const JWT_SECRET = process.env.JWT_SECRET || "dev_secret";
 const PORT = process.env.PORT || 5000;
-const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
-const ADMIN_EMAIL = "finditn83@gmail.com";
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "finditn83@gmail.com";
 
 // =====================
-// INITIALIZE EXPRESS
+// INITIALIZE EXPRESS (CORS fixed)
 // =====================
 const app = express();
+
+const DEFAULT_ORIGINS = [
+  "http://localhost:5173",
+  "http://localhost:3000",
+  "https://pasearch-frontend.vercel.app",
+];
+const EXTRA_ORIGINS = (process.env.CORS_EXTRA_ORIGINS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+const LEGACY_FRONTEND = (process.env.FRONTEND_URL || "").trim();
+const ALLOWED = new Set(
+  [...DEFAULT_ORIGINS, ...EXTRA_ORIGINS, LEGACY_FRONTEND].filter(Boolean)
+);
+
+function isAllowedOrigin(origin) {
+  if (!origin) return true; // same-origin/tools
+  try {
+    const url = new URL(origin);
+    const hostname = url.hostname;
+    if (ALLOWED.has(origin)) return true;
+    if (hostname.endsWith(".vercel.app")) return true; // allow Vercel previews
+  } catch (_) {}
+  return false;
+}
+
 app.use(
   cors({
-    origin: (origin, cb) => {
-      const allowed = [FRONTEND_URL];
-      if (!origin) return cb(null, true);
-      const ok =
-        allowed.includes(origin) ||
-        /\.vercel\.app$/.test(new URL(origin).hostname);
-      return cb(ok ? null : new Error("CORS blocked"), ok);
-    },
+    origin: (origin, cb) =>
+      cb(isAllowedOrigin(origin) ? null : new Error("CORS blocked"), isAllowedOrigin(origin)),
     credentials: true,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+    optionsSuccessStatus: 204,
   })
 );
+app.options("*", cors());
+
 app.use(express.json({ limit: "5mb" }));
 app.use(express.urlencoded({ extended: true }));
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 app.use("/uploads", express.static(UPLOAD_DIR));
+
+// Simple health endpoints for debugging
+app.get("/api/health", (_, res) =>
+  res.json({
+    ok: true,
+    service: "PASEARCH Backend",
+    env: process.env.NODE_ENV || "development",
+    time: new Date().toISOString(),
+  })
+);
 
 // =====================
 // MULTER SETUP
@@ -104,6 +139,14 @@ db.serialize(() => {
     trackedAt TEXT
   )`);
 
+  // Ensure this exists because we insert into it on login
+  db.run(`CREATE TABLE IF NOT EXISTS system_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    action TEXT,
+    timestamp TEXT
+  )`);
+
   db.run(`CREATE INDEX IF NOT EXISTS idx_devices_imei ON devices(imei)`);
 });
 
@@ -152,6 +195,7 @@ async function logUser({ username, email, phone, role }) {
     new Date().toLocaleString(),
   ]);
 }
+
 async function logDevice(d) {
   await appendToSheet("Devices", [
     d.device_category || "N/A",
@@ -163,6 +207,7 @@ async function logDevice(d) {
     new Date().toLocaleString(),
   ]);
 }
+
 async function logPasswordEvent({ email, action, actor }) {
   await appendToSheet("PasswordLogs", [
     email,
@@ -171,6 +216,7 @@ async function logPasswordEvent({ email, action, actor }) {
     new Date().toLocaleString(),
   ]);
 }
+
 async function logSystemEvent({ email, role, event }) {
   await appendToSheet("SystemLogs", [
     email,
@@ -192,10 +238,27 @@ const transporter = useEmail
   : null;
 
 // =====================
+// OPTIONAL AUTH MIDDLEWARE (for protected routes)
+// =====================
+function auth(req, res, next) {
+  const hdr = req.headers.authorization || "";
+  const token = hdr.startsWith("Bearer ") ? hdr.slice(7) : null;
+  if (!token) return res.status(401).json({ error: "No token provided" });
+  jwt.verify(token, JWT_SECRET, (err, decoded) => {
+    if (err && err.name === "TokenExpiredError") {
+      return res.status(401).json({ error: "Token expired" });
+    }
+    if (err) return res.status(401).json({ error: "Invalid token" });
+    req.user = decoded;
+    next();
+  });
+}
+
+// =====================
 // ROUTES
 // =====================
 
-// Health Check
+// Root — health info
 app.get("/", (_, res) =>
   res.json({
     ok: true,
@@ -255,7 +318,7 @@ app.post("/auth/register", (req, res) => {
 });
 
 // ==============================
-// ✅ LOGIN (fixed & cleaned)
+// ✅ LOGIN
 // ==============================
 app.post("/auth/login", async (req, res) => {
   try {
@@ -324,6 +387,7 @@ app.post("/auth/update-password", (req, res) => {
 
   db.get("SELECT * FROM users WHERE email=?", [email], (err, u) => {
     if (err || !u) return res.status(404).json({ error: "User not found" });
+
     if (!bcrypt.compareSync(currentPassword, u.password))
       return res.status(400).json({ error: "Incorrect password" });
 
@@ -336,7 +400,6 @@ app.post("/auth/update-password", (req, res) => {
         action: "User changed own password",
         actor: email,
       });
-
       res.json({ message: "Password updated successfully" });
     });
   });
@@ -362,9 +425,7 @@ app.post(
       reporter_email,
     } = req.body;
 
-    const proof_path = req.files?.proof_path
-      ? req.files.proof_path[0].path
-      : null;
+    const proof_path = req.files?.proof_path ? req.files.proof_path[0].path : null;
     const police_path = req.files?.police_report_path
       ? req.files.police_report_path[0].path
       : null;
@@ -399,7 +460,7 @@ app.post(
           location_area,
           reporter_email,
         });
-        res.json({ message: "Device reported successfully" });
+        res.json({ message: "Device reported successfully", id: this.lastID });
       }
     );
   }
@@ -435,7 +496,7 @@ app.post("/track-device", async (req, res) => {
 });
 
 // =====================
-// 🧠 OPENAI ASSISTANT
+// 🧠 OPENAI ASSISTANT (uses Node 18+ global fetch)
 // =====================
 app.post("/api/ask-ai", async (req, res) => {
   try {
@@ -444,19 +505,18 @@ app.post("/api/ask-ai", async (req, res) => {
     if (!apiKey) {
       return res.status(500).json({ error: "OpenAI API key not configured" });
     }
-
     const body = {
       model: "gpt-4o-mini",
       messages: [
         {
           role: "system",
-          content: `You are PasearchAI — a privacy-focused assistant integrated into the Pasearch platform. Help users report, track and recover devices responsibly.`,
+          content:
+            "You are PasearchAI — a privacy-focused assistant integrated into the Pasearch platform. Help users report and recover devices.",
         },
         { role: "user", content: prompt || "" },
       ],
       max_tokens: 250,
     };
-
     const r = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -465,13 +525,11 @@ app.post("/api/ask-ai", async (req, res) => {
       },
       body: JSON.stringify(body),
     });
-
     if (!r.ok) {
       const t = await r.text();
       console.error("OpenAI error:", r.status, t);
       return res.status(502).json({ error: "OpenAI upstream error" });
     }
-
     const data = await r.json();
     const reply =
       data?.choices?.[0]?.message?.content ||
@@ -484,7 +542,7 @@ app.post("/api/ask-ai", async (req, res) => {
 });
 
 // =====================
-// 404 HANDLER + SERVER START
+// 404 + ERROR HANDLERS & SERVER START
 // =====================
 app.use((_, res) => res.status(404).json({ error: "Route not found" }));
 
