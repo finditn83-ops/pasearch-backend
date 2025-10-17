@@ -1,6 +1,3 @@
-// =====================
-// IMPORTS & CONFIG
-// =====================
 const express = require("express");
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
@@ -13,18 +10,12 @@ const fs = require("fs");
 const { google } = require("googleapis");
 require("dotenv").config();
 
-// =====================
-// CONFIGURATION
-// =====================
 const DB_PATH = path.join(__dirname, "devices.db");
 const UPLOAD_DIR = path.join(__dirname, "uploads");
 const JWT_SECRET = process.env.JWT_SECRET || "dev_secret";
 const PORT = process.env.PORT || 5000;
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "finditn83@gmail.com";
 
-// =====================
-// INITIALIZE EXPRESS (CORS fixed)
-// =====================
 const app = express();
 
 const DEFAULT_ORIGINS = [
@@ -36,19 +27,18 @@ const EXTRA_ORIGINS = (process.env.CORS_EXTRA_ORIGINS || "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
-
 const LEGACY_FRONTEND = (process.env.FRONTEND_URL || "").trim();
 const ALLOWED = new Set(
   [...DEFAULT_ORIGINS, ...EXTRA_ORIGINS, LEGACY_FRONTEND].filter(Boolean)
 );
 
 function isAllowedOrigin(origin) {
-  if (!origin) return true; // same-origin/tools
+  if (!origin) return true;
   try {
     const url = new URL(origin);
     const hostname = url.hostname;
     if (ALLOWED.has(origin)) return true;
-    if (hostname.endsWith(".vercel.app")) return true; // allow Vercel previews
+    if (hostname.endsWith(".vercel.app")) return true;
   } catch (_) {}
   return false;
 }
@@ -63,15 +53,15 @@ app.use(
     optionsSuccessStatus: 204,
   })
 );
-app.options("*", cors());
+app.options("/*", cors());
 
 app.use(express.json({ limit: "5mb" }));
 app.use(express.urlencoded({ extended: true }));
+
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 app.use("/uploads", express.static(UPLOAD_DIR));
 
-// Simple health endpoints for debugging
-app.get("/api/health", (_, res) =>
+app.get("/", (_, res) =>
   res.json({
     ok: true,
     service: "PASEARCH Backend",
@@ -80,9 +70,17 @@ app.get("/api/health", (_, res) =>
   })
 );
 
-// =====================
-// MULTER SETUP
-// =====================
+app.get("/api/health", (_, res) =>
+  res.json({
+    ok: true,
+    message: "Backend reachable ✅",
+    service: "PASEARCH Backend",
+    env: process.env.NODE_ENV || "development",
+    time: new Date().toISOString(),
+  })
+);
+
+// Multer
 const storage = multer.diskStorage({
   destination: (_, __, cb) => cb(null, UPLOAD_DIR),
   filename: (_, file, cb) =>
@@ -90,9 +88,7 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
-// =====================
-// DATABASE
-// =====================
+// DB
 const db = new sqlite3.Database(DB_PATH, (err) => {
   if (err) console.error("❌ DB error:", err.message);
   else console.log("✅ Connected to SQLite database.");
@@ -125,6 +121,8 @@ db.serialize(() => {
     police_report_path TEXT,
     lost_datetime TEXT,
     other_details TEXT,
+    status TEXT DEFAULT 'reported',
+    recovered_at TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(user_id) REFERENCES users(id)
   )`);
@@ -139,7 +137,6 @@ db.serialize(() => {
     trackedAt TEXT
   )`);
 
-  // Ensure this exists because we insert into it on login
   db.run(`CREATE TABLE IF NOT EXISTS system_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER,
@@ -148,14 +145,16 @@ db.serialize(() => {
   )`);
 
   db.run(`CREATE INDEX IF NOT EXISTS idx_devices_imei ON devices(imei)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_tracking_imei ON tracking(imei)`);
 });
 
-// =====================
-// GOOGLE SHEETS HELPER
-// =====================
+// Light migration for status/recovered_at (ignore if already exist)
+db.run(`ALTER TABLE devices ADD COLUMN status TEXT DEFAULT 'reported'`, (e) => {});
+db.run(`ALTER TABLE devices ADD COLUMN recovered_at TEXT`, (e) => {});
+
+// Google Sheets helper
 const SHEET_ID = process.env.GOOGLE_SHEET_ID || "";
 let sheetsClient = null;
-
 (function initSheets() {
   try {
     const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
@@ -171,7 +170,6 @@ let sheetsClient = null;
     console.warn("⚠️ Sheets disabled:", err.message);
   }
 })();
-
 async function appendToSheet(tab, values) {
   if (!sheetsClient || !SHEET_ID) return;
   try {
@@ -186,49 +184,7 @@ async function appendToSheet(tab, values) {
   }
 }
 
-async function logUser({ username, email, phone, role }) {
-  await appendToSheet("Users", [
-    username,
-    email,
-    phone || "N/A",
-    role,
-    new Date().toLocaleString(),
-  ]);
-}
-
-async function logDevice(d) {
-  await appendToSheet("Devices", [
-    d.device_category || "N/A",
-    d.device_type || "N/A",
-    d.imei || "N/A",
-    d.color || "N/A",
-    d.location_area || "N/A",
-    d.reporter_email || "N/A",
-    new Date().toLocaleString(),
-  ]);
-}
-
-async function logPasswordEvent({ email, action, actor }) {
-  await appendToSheet("PasswordLogs", [
-    email,
-    action,
-    actor,
-    new Date().toLocaleString(),
-  ]);
-}
-
-async function logSystemEvent({ email, role, event }) {
-  await appendToSheet("SystemLogs", [
-    email,
-    role,
-    event,
-    new Date().toLocaleString(),
-  ]);
-}
-
-// =====================
-// EMAIL SETUP
-// =====================
+// Email
 const useEmail = !!process.env.EMAIL_USER && !!process.env.EMAIL_PASS;
 const transporter = useEmail
   ? nodemailer.createTransport({
@@ -237,9 +193,7 @@ const transporter = useEmail
     })
   : null;
 
-// =====================
-// OPTIONAL AUTH MIDDLEWARE (for protected routes)
-// =====================
+// Auth helpers
 function auth(req, res, next) {
   const hdr = req.headers.authorization || "";
   const token = hdr.startsWith("Bearer ") ? hdr.slice(7) : null;
@@ -253,24 +207,17 @@ function auth(req, res, next) {
     next();
   });
 }
+const requireRole =
+  (...roles) =>
+  (req, res, next) => {
+    if (!req.user || !roles.includes(req.user.role))
+      return res.status(403).json({ error: "Forbidden" });
+    next();
+  };
 
-// =====================
 // ROUTES
-// =====================
 
-// Root — health info
-app.get("/", (_, res) =>
-  res.json({
-    ok: true,
-    service: "PASEARCH Backend",
-    env: process.env.NODE_ENV || "development",
-    time: new Date().toISOString(),
-  })
-);
-
-// ==============================
-// ✅ REGISTER
-// ==============================
+// Register
 app.post("/auth/register", (req, res) => {
   const { username, email, phone, password, role } = req.body;
   if (!username || !email || !password)
@@ -295,8 +242,6 @@ app.post("/auth/register", (req, res) => {
         { expiresIn: "7d" }
       );
 
-      logUser({ username, email, phone, role: userRole });
-
       if (useEmail) {
         transporter
           .sendMail({
@@ -317,9 +262,7 @@ app.post("/auth/register", (req, res) => {
   );
 });
 
-// ==============================
-// ✅ LOGIN
-// ==============================
+// Login
 app.post("/auth/login", async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -331,8 +274,7 @@ app.post("/auth/login", async (req, res) => {
       if (!user) return res.status(401).json({ error: "Invalid credentials" });
 
       const isMatch = await bcrypt.compare(password, user.password);
-      if (!isMatch)
-        return res.status(401).json({ error: "Invalid credentials" });
+      if (!isMatch) return res.status(401).json({ error: "Invalid credentials" });
 
       if (user.email === ADMIN_EMAIL && user.role !== "admin") {
         db.run("UPDATE users SET role='admin' WHERE email=?", [email]);
@@ -348,17 +290,8 @@ app.post("/auth/login", async (req, res) => {
       const timestamp = new Date().toISOString();
       db.run(
         "INSERT INTO system_logs (user_id, action, timestamp) VALUES (?, ?, ?)",
-        [user.id, "User Login", timestamp],
-        (logErr) => {
-          if (logErr) console.error("System log error:", logErr);
-        }
+        [user.id, "User Login", timestamp]
       );
-
-      await logSystemEvent({
-        email: user.email,
-        role: user.role,
-        event: "Login Successful",
-      });
 
       res.json({
         message: "Login successful",
@@ -377,9 +310,7 @@ app.post("/auth/login", async (req, res) => {
   }
 });
 
-// ==============================
-// ✅ UPDATE PASSWORD
-// ==============================
+// Update password
 app.post("/auth/update-password", (req, res) => {
   const { email, currentPassword, newPassword } = req.body;
   if (!email || !currentPassword || !newPassword)
@@ -387,27 +318,18 @@ app.post("/auth/update-password", (req, res) => {
 
   db.get("SELECT * FROM users WHERE email=?", [email], (err, u) => {
     if (err || !u) return res.status(404).json({ error: "User not found" });
-
     if (!bcrypt.compareSync(currentPassword, u.password))
       return res.status(400).json({ error: "Incorrect password" });
 
     const hashed = bcrypt.hashSync(newPassword, 10);
     db.run("UPDATE users SET password=? WHERE email=?", [hashed, email], (e2) => {
       if (e2) return res.status(500).json({ error: "Update failed" });
-
-      logPasswordEvent({
-        email,
-        action: "User changed own password",
-        actor: email,
-      });
       res.json({ message: "Password updated successfully" });
     });
   });
 });
 
-// ==============================
-// ✅ REPORT DEVICE
-// ==============================
+// Report device
 app.post(
   "/report-device",
   upload.fields([{ name: "proof_path" }, { name: "police_report_path" }]),
@@ -452,23 +374,13 @@ app.post(
           console.error("Device insert error:", err.message);
           return res.status(500).json({ error: "Failed to report device" });
         }
-        logDevice({
-          device_category,
-          device_type,
-          imei,
-          color,
-          location_area,
-          reporter_email,
-        });
         res.json({ message: "Device reported successfully", id: this.lastID });
       }
     );
   }
 );
 
-// ==============================
-// ✅ TRACK DEVICE
-// ==============================
+// Track device (GPS ping)
 app.post("/track-device", async (req, res) => {
   const { imei, latitude, longitude, address, trackerName } = req.body;
   const trackedAt = new Date().toLocaleString();
@@ -495,28 +407,199 @@ app.post("/track-device", async (req, res) => {
   );
 });
 
-// =====================
-// 🧠 OPENAI ASSISTANT (uses Node 18+ global fetch)
-// =====================
+// ===== Phase 2 endpoints =====
+
+// Device lookup by IMEI (+ optional history)
+app.get("/device/:imei", auth, (req, res) => {
+  const { imei } = req.params;
+  const history = req.query.history === "1" || req.query.history === "true";
+
+  db.get(
+    `SELECT d.*, u.username, u.email 
+     FROM devices d LEFT JOIN users u ON u.id = d.user_id 
+     WHERE d.imei = ? ORDER BY d.created_at DESC`,
+    [imei],
+    (err, device) => {
+      if (err) return res.status(500).json({ error: "DB error" });
+      if (!device) return res.status(404).json({ error: "Device not found" });
+
+      const trackingQuery = history
+        ? `SELECT * FROM tracking WHERE imei = ? ORDER BY id DESC LIMIT 100`
+        : `SELECT * FROM tracking WHERE imei = ? ORDER BY id DESC LIMIT 1`;
+
+      db.all(trackingQuery, [imei], (tErr, tRows) => {
+        if (tErr) return res.status(500).json({ error: "DB error (tracking)" });
+        res.json({
+          device,
+          last_location: history ? (tRows[0] || null) : (tRows[0] || null),
+          history: history ? tRows : undefined,
+        });
+      });
+    }
+  );
+});
+
+// Admin: list users (paginated, search)
+app.get("/admin/users", auth, requireRole("admin"), (req, res) => {
+  const page = Math.max(parseInt(req.query.page || "1", 10), 1);
+  const limit = Math.min(Math.max(parseInt(req.query.limit || "20", 10), 1), 100);
+  const q = (req.query.q || "").trim();
+  const offset = (page - 1) * limit;
+
+  const where = q ? `WHERE username LIKE ? OR email LIKE ?` : "";
+  const params = q ? [`%${q}%`, `%${q}%`] : [];
+
+  db.all(
+    `SELECT id, username, email, phone, role, verified, created_at
+     FROM users ${where} ORDER BY id DESC LIMIT ? OFFSET ?`,
+    [...params, limit, offset],
+    (err, rows) => {
+      if (err) return res.status(500).json({ error: "DB error" });
+      db.get(
+        `SELECT COUNT(*) as total FROM users ${where}`,
+        params,
+        (cErr, cRow) => {
+          if (cErr) return res.status(500).json({ error: "DB error" });
+          res.json({ page, limit, total: cRow.total, users: rows });
+        }
+      );
+    }
+  );
+});
+
+// Admin: list devices (paginated, search by imei/email/location/status)
+app.get("/admin/devices", auth, requireRole("admin"), (req, res) => {
+  const page = Math.max(parseInt(req.query.page || "1", 10), 1);
+  const limit = Math.min(Math.max(parseInt(req.query.limit || "20", 10), 1), 100);
+  const offset = (page - 1) * limit;
+
+  const imei = (req.query.imei || "").trim();
+  const email = (req.query.email || "").trim();
+  const location = (req.query.location || "").trim();
+  const status = (req.query.status || "").trim();
+
+  const filters = [];
+  const params = [];
+  if (imei) {
+    filters.push("d.imei LIKE ?");
+    params.push(`%${imei}%`);
+  }
+  if (email) {
+    filters.push("u.email LIKE ?");
+    params.push(`%${email}%`);
+  }
+  if (location) {
+    filters.push("d.location_area LIKE ?");
+    params.push(`%${location}%`);
+  }
+  if (status) {
+    filters.push("d.status = ?");
+    params.push(status);
+  }
+  const where = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+
+  db.all(
+    `SELECT d.*, u.username, u.email
+     FROM devices d LEFT JOIN users u ON u.id = d.user_id
+     ${where}
+     ORDER BY d.id DESC LIMIT ? OFFSET ?`,
+    [...params, limit, offset],
+    (err, rows) => {
+      if (err) return res.status(500).json({ error: "DB error" });
+      db.get(
+        `SELECT COUNT(*) as total
+         FROM devices d LEFT JOIN users u ON u.id = d.user_id
+         ${where}`,
+        params,
+        (cErr, cRow) => {
+          if (cErr) return res.status(500).json({ error: "DB error" });
+          res.json({ page, limit, total: cRow.total, devices: rows });
+        }
+      );
+    }
+  );
+});
+
+// Admin: update device status (reported|investigating|recovered)
+app.patch("/admin/devices/:id/status", auth, requireRole("admin"), (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const { status } = req.body;
+  const allowed = new Set(["reported", "investigating", "recovered"]);
+  if (!allowed.has(status)) return res.status(400).json({ error: "Invalid status" });
+
+  const recoveredAt = status === "recovered" ? new Date().toISOString() : null;
+  db.run(
+    `UPDATE devices SET status = ?, recovered_at = ? WHERE id = ?`,
+    [status, recoveredAt, id],
+    function (err) {
+      if (err) return res.status(500).json({ error: "DB error" });
+      if (this.changes === 0) return res.status(404).json({ error: "Device not found" });
+      res.json({ success: true, id, status, recovered_at: recoveredAt });
+    }
+  );
+});
+
+// Police: search devices (by IMEI/email/location/status)
+app.get("/police/devices/search", auth, requireRole("police", "admin"), (req, res) => {
+  const imei = (req.query.imei || "").trim();
+  const email = (req.query.email || "").trim();
+  const location = (req.query.location || "").trim();
+  const status = (req.query.status || "").trim();
+
+  const filters = [];
+  const params = [];
+  if (imei) {
+    filters.push("d.imei LIKE ?");
+    params.push(`%${imei}%`);
+  }
+  if (email) {
+    filters.push("u.email LIKE ?");
+    params.push(`%${email}%`);
+  }
+  if (location) {
+    filters.push("d.location_area LIKE ?");
+    params.push(`%${location}%`);
+  }
+  if (status) {
+    filters.push("d.status = ?");
+    params.push(status);
+  }
+  const where = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+
+  db.all(
+    `SELECT d.id, d.device_category, d.device_type, d.imei, d.color, d.location_area, d.status, d.recovered_at, d.created_at,
+            u.username, u.email
+     FROM devices d LEFT JOIN users u ON u.id = d.user_id
+     ${where}
+     ORDER BY d.id DESC LIMIT 50`,
+    params,
+    (err, rows) => {
+      if (err) return res.status(500).json({ error: "DB error" });
+      res.json({ results: rows });
+    }
+  );
+});
+
+// Ask-AI (PasearchAI)
 app.post("/api/ask-ai", async (req, res) => {
   try {
-    const { prompt, memory } = req.body;
+    const { prompt } = req.body;
     const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) {
-      return res.status(500).json({ error: "OpenAI API key not configured" });
-    }
+    if (!apiKey) return res.status(500).json({ error: "OpenAI API key not configured" });
+
     const body = {
       model: "gpt-4o-mini",
       messages: [
         {
           role: "system",
           content:
-            "You are PasearchAI — a privacy-focused assistant integrated into the Pasearch platform. Help users report and recover devices.",
+            "You are PasearchAI — a privacy-focused assistant integrated into the Pasearch platform. Help users report and recover devices, give safety tips, and guide them through the platform.",
         },
         { role: "user", content: prompt || "" },
       ],
-      max_tokens: 250,
+      max_tokens: 300,
     };
+
     const r = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -531,9 +614,7 @@ app.post("/api/ask-ai", async (req, res) => {
       return res.status(502).json({ error: "OpenAI upstream error" });
     }
     const data = await r.json();
-    const reply =
-      data?.choices?.[0]?.message?.content ||
-      "Sorry — I couldn’t generate a response.";
+    const reply = data?.choices?.[0]?.message?.content || "Sorry — I couldn’t generate a response.";
     res.json({ reply });
   } catch (err) {
     console.error("AI route error:", err);
@@ -541,9 +622,7 @@ app.post("/api/ask-ai", async (req, res) => {
   }
 });
 
-// =====================
-// 404 + ERROR HANDLERS & SERVER START
-// =====================
+// 404 + start
 app.use((_, res) => res.status(404).json({ error: "Route not found" }));
 
 app.listen(PORT, "0.0.0.0", () =>
