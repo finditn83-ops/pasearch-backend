@@ -380,7 +380,9 @@ app.post(
   }
 );
 
-// Track device (GPS ping)
+// ==============================
+// ✅ TRACK DEVICE (with live emit)
+// ==============================
 app.post("/track-device", async (req, res) => {
   const { imei, latitude, longitude, address, trackerName } = req.body;
   const trackedAt = new Date().toLocaleString();
@@ -394,6 +396,7 @@ app.post("/track-device", async (req, res) => {
         console.error("DB insert error:", err);
         return res.status(500).json({ error: "Database error" });
       }
+
       await appendToSheet("Tracking", [
         imei,
         latitude,
@@ -402,10 +405,18 @@ app.post("/track-device", async (req, res) => {
         trackerName,
         trackedAt,
       ]);
-      res.json({ success: true, message: "Device location updated successfully" });
+
+      // ✅ Broadcast to all connected Police Dashboards
+      emitTrackingUpdate({ imei, latitude, longitude, address, trackerName, trackedAt });
+
+      res.json({
+        success: true,
+        message: "Device location updated successfully",
+      });
     }
   );
 });
+
 
 // ===== Phase 2 endpoints =====
 
@@ -578,7 +589,7 @@ app.get("/police/devices/search", auth, requireRole("police", "admin"), (req, re
       res.json({ results: rows });
     }
   );
-});
+x});
 
 // Ask-AI (PasearchAI)
 app.post("/api/ask-ai", async (req, res) => {
@@ -621,10 +632,166 @@ app.post("/api/ask-ai", async (req, res) => {
     res.status(500).json({ error: "AI request failed" });
   }
 });
+ 
+// ==============================
+// 📊 ADMIN DASHBOARD METRICS
+// ==============================
+app.get("/admin/metrics", async (req, res) => {
+  try {
+    let result = {
+      total_users: 0,
+      total_devices: 0,
+      recovered: 0,
+      investigating: 0,
+    };
 
-// 404 + start
+    await new Promise((resolve) => {
+      db.all(
+        "SELECT COUNT(*) as count FROM users",
+        [],
+        (err, rows) => {
+          if (!err && rows?.[0]) result.total_users = rows[0].count;
+          resolve();
+        }
+      );
+    });
+
+    await new Promise((resolve) => {
+      db.all(
+        "SELECT COUNT(*) as count FROM devices",
+        [],
+        (err, rows) => {
+          if (!err && rows?.[0]) result.total_devices = rows[0].count;
+          resolve();
+        }
+      );
+    });
+
+    await new Promise((resolve) => {
+      db.all(
+        "SELECT COUNT(*) as count FROM devices WHERE status='recovered'",
+        [],
+        (err, rows) => {
+          if (!err && rows?.[0]) result.recovered = rows[0].count;
+          resolve();
+        }
+      );
+    });
+
+    await new Promise((resolve) => {
+      db.all(
+        "SELECT COUNT(*) as count FROM devices WHERE status='investigating'",
+        [],
+        (err, rows) => {
+          if (!err && rows?.[0]) result.investigating = rows[0].count;
+          resolve();
+        }
+      );
+    });
+
+    res.json({ ok: true, metrics: result });
+  } catch (err) {
+    console.error("Metrics error:", err);
+    res.status(500).json({ ok: false, error: "Failed to load metrics" });
+  }
+});
+
+// ==============================
+// 🕒 ADMIN RECENT ACTIVITY LOGS
+// ==============================
+app.get("/admin/activity", (req, res) => {
+  try {
+    const activity = {};
+
+    db.all(
+      "SELECT u.username, u.email, s.action, s.timestamp FROM system_logs s JOIN users u ON s.user_id = u.id ORDER BY s.timestamp DESC LIMIT 10",
+      [],
+      (err, rows) => {
+        if (err) {
+          console.error("System log error:", err);
+          return res.status(500).json({ error: "Failed to load system logs" });
+        }
+        activity.system_logs = rows || [];
+
+        db.all(
+          "SELECT id, imei, device_type, status, created_at FROM devices ORDER BY created_at DESC LIMIT 10",
+          [],
+          (err2, deviceRows) => {
+            if (err2) {
+              console.error("Device log error:", err2);
+              return res.status(500).json({ error: "Failed to load devices" });
+            }
+            activity.device_reports = deviceRows || [];
+            res.json({ ok: true, activity });
+          }
+        );
+      }
+    );
+  } catch (err) {
+    console.error("Activity route error:", err);
+    res.status(500).json({ error: "Server error while fetching activity logs" });
+  }
+});
+
+// ==============================
+// 👮 POLICE: GET TRACKING EVENTS
+// ==============================
+app.get("/police/tracking", (req, res) => {
+  const { imei } = req.query;
+
+  if (!imei)
+    return res.status(400).json({ error: "IMEI query parameter required" });
+
+  db.all(
+    "SELECT imei, latitude, longitude, address, trackerName, trackedAt FROM tracking WHERE imei = ? ORDER BY trackedAt DESC LIMIT 20",
+    [imei],
+    (err, rows) => {
+      if (err) {
+        console.error("Tracking query error:", err.message);
+        return res.status(500).json({ error: "Database error" });
+      }
+      res.json({ ok: true, imei, tracks: rows });
+    }
+  );
+});
+
+// 404 HANDLER (keep this)
 app.use((_, res) => res.status(404).json({ error: "Route not found" }));
 
-app.listen(PORT, "0.0.0.0", () =>
-  console.log(`🚀 PASEARCH backend running on http://localhost:${PORT}`)
-);
+// =====================
+// ⚡ SOCKET.IO REAL-TIME SERVER
+// =====================
+const http = require("http");
+const { Server } = require("socket.io");
+
+// Create HTTP + WebSocket server
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: {
+    origin: [
+      "http://localhost:5173",
+      "https://pasearch-frontend.vercel.app"
+    ],
+    methods: ["GET", "POST"],
+  },
+});
+
+// 🔌 Handle connections
+io.on("connection", (socket) => {
+  console.log("Police or Tracker connected:", socket.id);
+  socket.on("disconnect", () => console.log("Disconnected:", socket.id));
+});
+
+// 🔊 Function to emit real-time tracking updates
+function emitTrackingUpdate(data) {
+  io.emit("tracking_update", data);
+}
+
+// 🧭 Inside your /track-device route (after inserting into DB), call this:
+// emitTrackingUpdate({ imei, latitude, longitude, address, trackerName, trackedAt });
+
+// 🏁 Start combined HTTP + WebSocket server
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`🚀 PASEARCH backend + WebSocket running on port ${PORT}`);
+});
+
