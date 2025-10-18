@@ -1,3 +1,6 @@
+// =====================
+// IMPORTS & CONFIG
+// =====================
 const express = require("express");
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
@@ -10,12 +13,18 @@ const fs = require("fs");
 const { google } = require("googleapis");
 require("dotenv").config();
 
+// =====================
+// CONFIGURATION
+// =====================
 const DB_PATH = path.join(__dirname, "devices.db");
 const UPLOAD_DIR = path.join(__dirname, "uploads");
 const JWT_SECRET = process.env.JWT_SECRET || "dev_secret";
 const PORT = process.env.PORT || 5000;
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "finditn83@gmail.com";
 
+// =====================
+// INITIALIZE EXPRESS & CORS
+// =====================
 const app = express();
 
 const DEFAULT_ORIGINS = [
