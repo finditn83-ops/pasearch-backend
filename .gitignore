@@ -1,14 +1,27 @@
-# Node modules and sensitive files
-node_modules/
+# ============================================
+# 🚫 Sensitive Files & Secrets
+# ============================================
 .env
-devices.db
-uploads/
+service-account.json
 
-# === System Files ===
+# ============================================
+# 📦 Node Modules & Build Outputs
+# ============================================
+node_modules/
+uploads/
+devices.db
+
+# ============================================
+# 🖥️ System & Cache Files
+# ============================================
 .DS_Store
 Thumbs.db
-service-account.json
-service-account.json
-service-account.json
-service-account.json
-service-account.json
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ============================================
+# ⚙️ Backup & Temporary Files
+# ============================================
+*.bak
+*.tmp
