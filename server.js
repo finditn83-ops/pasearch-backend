@@ -821,6 +821,31 @@ app.post("/api/ask-ai", async (req, res) => {
 });
 
 // ==============================
+// 🔁 MANUAL FRONTEND REDEPLOY TRIGGER
+// ==============================
+app.post("/trigger-frontend", async (req, res) => {
+  try {
+    const hookUrl = process.env.VERCEL_DEPLOY_HOOK;
+    if (!hookUrl) {
+      return res.status(500).json({ error: "VERCEL_DEPLOY_HOOK not configured in environment" });
+    }
+
+    const r = await fetch(hookUrl, { method: "POST" });
+    if (!r.ok) {
+      const text = await r.text();
+      console.error("Vercel redeploy failed:", r.status, text);
+      return res.status(502).json({ error: "Failed to trigger Vercel redeploy" });
+    }
+
+    console.log("✅ Triggered Vercel frontend redeploy");
+    res.json({ success: true, message: "Frontend redeploy triggered successfully!" });
+  } catch (err) {
+    console.error("Trigger-frontend error:", err.message);
+    res.status(500).json({ error: "Server error while triggering frontend redeploy" });
+  }
+});
+
+// ==============================
 // ✅ 404 HANDLER
 // ==============================
 app.use((_, res) => res.status(404).json({ error: "Route not found" }));
