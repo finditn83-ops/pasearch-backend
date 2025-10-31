@@ -14,6 +14,30 @@ const { google } = require("googleapis");
 require("dotenv").config();
 
 // =====================
+// GOOGLE SHEETS HELPER (modern credentials)
+// =====================
+async function logToGoogleSheet(dataRow) {
+  try {
+    const auth = new google.auth.GoogleAuth({
+      credentials: JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON),
+      scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+    });
+
+    const sheets = google.sheets({ version: "v4", auth });
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: process.env.GOOGLE_SHEET_ID,
+      range: "Sheet1!A1",
+      valueInputOption: "USER_ENTERED",
+      requestBody: { values: [dataRow] },
+    });
+
+    console.log("✅ Logged to Google Sheets:", dataRow);
+  } catch (err) {
+    console.error("❌ Sheets logging error:", err.message);
+  }
+}
+
+// =====================
 // CONFIGURATION
 // =====================
 const DB_PATH = path.join(__dirname, "devices.db");
@@ -32,14 +56,32 @@ const DEFAULT_ORIGINS = [
   "http://localhost:3000",
   "https://pasearch-frontend.vercel.app",
 ];
+
 const EXTRA_ORIGINS = (process.env.CORS_EXTRA_ORIGINS || "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
+
 const LEGACY_FRONTEND = (process.env.FRONTEND_URL || "").trim();
+
 const ALLOWED = new Set(
   [...DEFAULT_ORIGINS, ...EXTRA_ORIGINS, LEGACY_FRONTEND].filter(Boolean)
 );
+
+// ✅ Apply CORS middleware (final step)
+app.use(
+  cors({
+    origin: (origin, cb) => {
+      if (!origin) return cb(null, true); // allow Postman / same-origin
+      const ok =
+        ALLOWED.has(origin) ||
+        /\.vercel\.app$/.test(new URL(origin).hostname);
+      cb(ok ? null : new Error("CORS blocked"), ok);
+    },
+    credentials: true,
+  })
+);
+
 
 function isAllowedOrigin(origin) {
   if (!origin) return true;
@@ -263,41 +305,64 @@ const requireRole =
 // AUTH ROUTES
 // =====================
 
-// Register
+// =====================
+// REGISTER USER (with Google Sheets logging)
+// =====================
 app.post("/auth/register", async (req, res) => {
   try {
     const { username, email, phone, password, role } = req.body;
-    if (!username || !email || !password)
+
+    if (!username || !email || !password) {
       return res.status(400).json({ error: "All fields required" });
+    }
 
     const userRole = email === ADMIN_EMAIL ? "admin" : role || "reporter";
     const hashed = await bcrypt.hash(password, 10);
 
     db.run(
-      "INSERT INTO users (username, email, phone, password, role, verified) VALUES (?, ?, ?, ?, ?, 1)",
+      "INSERT INTO users (username, email, phone, password, role, verified) VALUES (?, ?, ?, ?, ?, 0)",
       [username, email, phone, hashed, userRole],
       async function (err) {
         if (err) {
-          if (err.message.includes("UNIQUE"))
-            return res.status(409).json({ error: "Username or email exists" });
+          if (err.message.includes("UNIQUE")) {
+            return res
+              .status(409)
+              .json({ error: "Username or email already exists" });
+          }
+          console.error("Database error:", err);
           return res.status(500).json({ error: "Database error" });
         }
 
+        // ✅ Generate token
         const token = jwt.sign(
           { id: this.lastID, username, email, role: userRole },
           JWT_SECRET,
           { expiresIn: "7d" }
         );
 
-        // ✅ Log to Google Sheets (Users tab)
+        // ✅ Log registration to Google Sheets
         await logToGoogleSheet([
           username,
           email,
           phone || "N/A",
           userRole,
-          new Date().toISOString().replace("T", " ").split(".")[0],
+          "New Registration",
+          new Date().toLocaleString(),
         ]);
 
+        console.log("✅ New user registered:", username);
+        res.json({
+          success: true,
+          token,
+          message: "Account created successfully",
+        });
+      }
+    );
+  } catch (error) {
+    console.error("Register error:", error);
+    res.status(500).json({ error: "Server error during registration" });
+  }
+});
         // ✅ Optional: email notification (only if EMAIL_USER is set)
         if (process.env.EMAIL_USER) {
           transporter
@@ -386,10 +451,13 @@ app.post("/auth/login", async (req, res) => {
 // =====================
 // LOGIN (already handled above)
 // =====================
-} catch (error) {
-  console.error("Login error:", error);
-  res.status(500).json({ error: "Server error during login" });
-}
+app.post("/login", async (req, res) => {
+  try {
+    // ... your login logic here ...
+  } catch (error) {
+    console.error("Login error:", error);
+    res.status(500).json({ error: "Server error during login" });
+  }
 });
 
 // =====================
@@ -503,13 +571,14 @@ app.post(
 );
 
 // ==============================
-// ✅ TRACK DEVICE (with live emit)
+// ✅ TRACK DEVICE (with live emit + Google Sheets logging)
 // ==============================
 app.post("/track-device", async (req, res) => {
   try {
     const { imei, latitude, longitude, address, trackerName } = req.body;
     const trackedAt = new Date().toISOString().replace("T", " ").split(".")[0];
 
+    // ✅ Save tracking info in local database
     db.run(
       `INSERT INTO tracking (imei, latitude, longitude, address, trackerName, trackedAt)
        VALUES (?, ?, ?, ?, ?, ?)`,
@@ -519,6 +588,47 @@ app.post("/track-device", async (req, res) => {
           console.error("DB insert error:", err.message);
           return res.status(500).json({ error: "Database error" });
         }
+
+        // ✅ Log tracking event to Google Sheets
+        try {
+          await logToGoogleSheet([
+            imei,
+            trackerName || "Unknown Tracker",
+            latitude || "N/A",
+            longitude || "N/A",
+            address || "N/A",
+            trackedAt,
+          ]);
+          console.log("✅ Logged tracking data to Google Sheets");
+        } catch (sheetErr) {
+          console.error("❌ Sheets logging error:", sheetErr.message);
+        }
+
+        // ✅ Optional: emit to connected clients (real-time tracking)
+        if (global.io) {
+          global.io.emit("deviceTracked", {
+            imei,
+            latitude,
+            longitude,
+            address,
+            trackerName,
+            trackedAt,
+          });
+        }
+
+        // ✅ Success response
+        res.json({
+          success: true,
+          message: "Device tracked successfully",
+          data: { imei, latitude, longitude, address, trackerName, trackedAt },
+        });
+      }
+    );
+  } catch (error) {
+    console.error("Track-device error:", error.message);
+    res.status(500).json({ error: "Server error during device tracking" });
+  }
+});
 
         // ✅ Log to Google Sheets (Tracking tab)
         await logToGoogleSheet([
