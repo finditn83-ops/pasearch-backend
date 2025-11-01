@@ -22,6 +22,7 @@
     "jsonwebtoken": "^9.0.2",
     "multer": "^2.0.2",
     "nodemailer": "^7.0.9",
+    "socket.io": "^4.8.1",
     "sqlite3": "^5.1.7"
   }
 }
