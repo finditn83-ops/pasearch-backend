@@ -630,6 +630,27 @@ app.post("/track-device", async (req, res) => {
   }
 });
 
+// ==============================
+// 🔁 TRIGGER FRONTEND DEPLOY FROM BACKEND
+// ==============================
+app.post("/trigger-frontend", async (req, res) => {
+  try {
+    const deployUrl = process.env.VERCEL_DEPLOY_HOOK_URL;
+    if (!deployUrl)
+      return res.status(400).json({ error: "Missing deploy hook URL" });
+
+    const response = await fetch(deployUrl, { method: "POST" });
+    if (!response.ok)
+      throw new Error(`Failed to trigger frontend: ${response.statusText}`);
+
+    console.log("✅ Frontend deploy triggered successfully");
+    res.json({ success: true, message: "Frontend redeploy triggered" });
+  } catch (error) {
+    console.error("❌ Frontend trigger error:", error.message);
+    res.status(500).json({ error: "Failed to trigger frontend" });
+  }
+});
+
         // ✅ Log to Google Sheets (Tracking tab)
         await logToGoogleSheet([
           imei,
@@ -982,6 +1003,12 @@ io.on("connection", (socket) => {
 function emitTrackingUpdate(data) {
   io.emit("tracking_update", data);
 }
+// ==============================
+// 🏠 DEFAULT HOME ROUTE
+// ==============================
+app.get("/", (req, res) => {
+  res.send("Welcome to Pasearch");
+});
 
 // ==============================
 // 🏁 START COMBINED SERVER
