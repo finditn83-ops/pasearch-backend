@@ -1,18 +1,14 @@
 {
   "name": "pasearch-backend",
   "version": "1.0.0",
-  "description": "PASEARCH Backend API (Express + SQLite + Google Sheets + Auto Deploy to Render & Vercel)",
+  "description": "PASEARCH Backend API (Express + SQLite + Google Sheets + Auto Deploy)",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "test": "echo \"Error: no test specified\" && exit 1",
-
-    // ✅ Manual deploy shortcuts (optional)
     "deploy-backend": "curl -X POST https://api.render.com/deploy/srv-d3ig4qbe5yourrenderid --header 'accept: application/json' --header 'authorization: Bearer YOUR_RENDER_TOKEN' --header 'content-type: application/json'",
     "deploy-frontend": "curl -X POST https://api.vercel.com/v1/integrations/deploy/prj_yourvercelid/yourhookid",
     "deploy-all": "npm run deploy-backend && npm run deploy-frontend",
-
-    // ✅ Automatic Vercel trigger after Render deployment
     "postinstall": "curl -X POST https://pasearch-backend.onrender.com/trigger-frontend || true"
   },
   "author": "Finditn (Benny)",
