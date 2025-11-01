@@ -17,6 +17,39 @@ const fetch = (...args) => import("node-fetch").then(({ default: fetch }) => fet
 require("dotenv").config();
 
 // =====================
+// EXPRESS + CORS
+// =====================
+const express = require("express");
+const cors = require("cors");
+
+const app = express(); // ✅ Define Express BEFORE using it
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true }));
+
+const ALLOWED = new Set([
+  "http://localhost:5173",
+  "http://localhost:3000",
+  "https://pasearch-frontend.vercel.app",
+  ...(process.env.CORS_EXTRA_ORIGINS || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
+]);
+
+app.use(
+  cors({
+    origin: (origin, cb) => {
+      if (!origin) return cb(null, true);
+      const ok =
+        ALLOWED.has(origin) ||
+        /\.vercel\.app$/.test(new URL(origin).hostname);
+      cb(ok ? null : new Error("CORS blocked"), ok);
+    },
+    credentials: true,
+  })
+);
+
+// =====================
 // CONFIGURATION
 // =====================
 const DB_PATH = path.join(__dirname, "devices.db");
