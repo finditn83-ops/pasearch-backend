@@ -25,19 +25,27 @@ const JWT_SECRET = process.env.JWT_SECRET || "dev_secret";
 const PORT = process.env.PORT || 5000;
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "finditn83@gmail.com";
 
-// =====================
-// EXPRESS + CORS
-// =====================
-const app = express();
-app.use(express.json({ limit: "10mb" }));
-app.use(express.urlencoded({ extended: true }));
-
 const ALLOWED = new Set([
   "http://localhost:5173",
   "http://localhost:3000",
   "https://pasearch-frontend.vercel.app",
-  ...(process.env.CORS_EXTRA_ORIGINS || "").split(",").map(s => s.trim()).filter(Boolean),
+  ...(process.env.CORS_EXTRA_ORIGINS || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
 ]);
+app.use(
+  cors({
+    origin: (origin, cb) => {
+      if (!origin) return cb(null, true); // allow Postman & same-origin
+      const ok =
+        ALLOWED.has(origin) ||
+        /\.vercel\.app$/.test(new URL(origin).hostname); // ✅ any Vercel preview domain
+      cb(ok ? null : new Error("CORS blocked"), ok);
+    },
+    credentials: true,
+  })
+);
 app.use(
   cors({
     origin: (origin, cb) => {
