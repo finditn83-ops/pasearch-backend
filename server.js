@@ -20,6 +20,111 @@ const { google } = require("googleapis");
 const fetch = (...args) =>
   import("node-fetch").then(({ default: fetch }) => fetch(...args));
 require("dotenv").config();
+// ==========================
+// ✅ GOOGLE SHEETS CONNECTION CHECK
+// ==========================
+if (process.env.GOOGLE_SHEET_ID && process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
+  console.log(`✅ Google Sheets logging enabled (Sheet ID: ${process.env.GOOGLE_SHEET_ID})`);
+} else {
+  console.warn("⚠️ Google Sheets disabled: Missing GOOGLE_SHEET_ID or GOOGLE_SERVICE_ACCOUNT_JSON in .env");
+}
+
+// ✅ Import admin routes
+const adminRoutes = require("./routes/admin");
+
+// ==========================
+// ✅ GOOGLE SHEETS LOGGING HELPER
+// ==========================
+async function logToGoogleSheet(dataRow) {
+  try {
+    if (!process.env.GOOGLE_SERVICE_ACCOUNT_JSON || !process.env.GOOGLE_SHEET_ID) {
+      console.warn("⚠️ Skipping Google Sheet log: Missing credentials or sheet ID");
+      return;
+    }
+
+    const serviceAccount = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+    const auth = new google.auth.GoogleAuth({
+      credentials: serviceAccount,
+      scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+    });
+
+    const sheets = google.sheets({ version: "v4", auth });
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: process.env.GOOGLE_SHEET_ID,
+      range: "Sheet1!A1",
+      valueInputOption: "USER_ENTERED",
+      requestBody: { values: [dataRow] },
+    });
+
+    console.log("✅ Logged to Google Sheet:", dataRow);
+  } catch (err) {
+    console.error("❌ Google Sheets log failed:", err.message);
+  }
+}
+
+// ==============================
+// ✅ GOOGLE SHEETS HELPER FOR ADMIN UPDATES
+// ==============================
+async function logToGoogleSheetInAdminTab(dataRow) {
+  try {
+    if (!process.env.GOOGLE_SERVICE_ACCOUNT_JSON || !process.env.GOOGLE_SHEET_ID) {
+      console.warn("⚠️ Skipping admin log: Missing Google credentials");
+      return;
+    }
+
+    const serviceAccount = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+    const auth = new google.auth.GoogleAuth({
+      credentials: serviceAccount,
+      scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+    });
+
+    const sheets = google.sheets({ version: "v4", auth });
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: process.env.GOOGLE_SHEET_ID,
+      range: "AdminUpdates!A1", // Logs into second tab
+      valueInputOption: "USER_ENTERED",
+      requestBody: { values: [dataRow] },
+    });
+  } catch (err) {
+    console.error("⚠️ Admin Sheet log error:", err.message);
+  }
+}
+
+// ==============================
+// ✅ GOOGLE SHEETS HELPER FOR POLICE UPDATES (logs to 'PoliceUpdates' tab)
+// ==============================
+async function logToGoogleSheetInPoliceTab(dataRow) {
+  try {
+    // Check credentials
+    if (!process.env.GOOGLE_SERVICE_ACCOUNT_JSON || !process.env.GOOGLE_SHEET_ID) {
+      console.warn("⚠️ Skipping police log: Missing Google credentials");
+      return;
+    }
+
+    // Parse credentials from .env
+    const serviceAccount = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+    const auth = new google.auth.GoogleAuth({
+      credentials: serviceAccount,
+      scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+    });
+
+    // Initialize Google Sheets API
+    const sheets = google.sheets({ version: "v4", auth });
+
+    // Append new row to PoliceUpdates tab
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: process.env.GOOGLE_SHEET_ID,
+      range: "PoliceUpdates!A1", // 👈 this is your tab name
+      valueInputOption: "USER_ENTERED",
+      requestBody: { values: [dataRow] },
+    });
+
+    console.log("✅ Logged to PoliceUpdates sheet:", dataRow);
+  } catch (err) {
+    console.error("⚠️ Police Sheet log error:", err.message);
+  }
+}
 
 // =====================
 // EXPRESS + CORS
@@ -127,24 +232,41 @@ db.serialize(() => {
 });
 
 // =====================
-// GOOGLE SHEETS HELPER
+// ✅ GOOGLE SHEETS HELPER (supports .env JSON or local file)
 // =====================
 async function logToGoogleSheet(dataRow) {
   try {
-    const keyFile =
-      process.env.GOOGLE_SERVICE_ACCOUNT_PATH || "./service-account.json";
-    if (!fs.existsSync(keyFile))
-      throw new Error(`Missing service account file: ${keyFile}`);
+    let auth;
 
-    const auth = new google.auth.GoogleAuth({
-      keyFile,
-      scopes: ["https://www.googleapis.com/auth/spreadsheets"],
-    });
+    // 1️⃣ Prefer inline JSON from .env
+    if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
+      const serviceAccount = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+      auth = new google.auth.GoogleAuth({
+        credentials: serviceAccount,
+        scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+      });
+    }
+    // 2️⃣ Fallback: use local key file for local testing
+    else {
+      const keyFile =
+        process.env.GOOGLE_SERVICE_ACCOUNT_PATH || "./service-account.json";
+      if (!fs.existsSync(keyFile))
+        throw new Error(`Missing service account file: ${keyFile}`);
 
+      auth = new google.auth.GoogleAuth({
+        keyFile,
+        scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+      });
+    }
+
+    // 3️⃣ Prepare Sheets API
     const sheets = google.sheets({ version: "v4", auth });
+
+    // 4️⃣ Add timestamp automatically
     const timestamp = new Date().toISOString().replace("T", " ").split(".")[0];
     const fullRow = [...dataRow, timestamp];
 
+    // 5️⃣ Append to sheet
     await sheets.spreadsheets.values.append({
       spreadsheetId: process.env.GOOGLE_SHEET_ID,
       range: "Sheet1!A1",
@@ -206,52 +328,74 @@ app.get("/api/health", (_, res) =>
   })
 );
 
-// Register user
+// ==============================
+// ✅ REGISTER USER
+// ==============================
 app.post("/auth/register", async (req, res) => {
   try {
     const { username, email, phone, password, role } = req.body;
-if (!username || !email || !phone || !password) {
-  return res
-    .status(400)
-    .json({ error: "Username, email, phone, and password are required." });
-}
 
-    const userRole = email === ADMIN_EMAIL ? "admin" : role || "reporter";
+    // 🔒 Basic validation
+    if (!username || !email || !phone || !password) {
+      return res.status(400).json({
+        error: "Username, email, phone, and password are required.",
+      });
+    }
+
+    // 👑 Auto-assign admin role if email matches ENV admin email
+    const userRole = email === process.env.ADMIN_EMAIL ? "admin" : role || "reporter";
+
+    // 🔑 Hash password
     const hashed = await bcrypt.hash(password, 10);
 
-    db.run(
-      "INSERT INTO users (username, email, phone, password, role, verified) VALUES (?, ?, ?, ?, ?, 0)",
-      [username, email, phone, hashed, userRole],
-      async function (err) {
-        if (err)
-          return res
-            .status(409)
-            .json({ error: "Username or email already exists" });
+    // 🗄️ Insert user into database
+    const sql =
+      "INSERT INTO users (username, email, phone, password, role, verified, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)";
+    const params = [
+      username,
+      email,
+      phone,
+      hashed,
+      userRole,
+      0, // not verified by default
+      new Date().toLocaleString(),
+    ];
 
-        const token = jwt.sign(
-          { id: this.lastID, username, email, role: userRole },
-          JWT_SECRET,
-          { expiresIn: "7d" }
-        );
-
-        await logToGoogleSheet([
-          username,
-          email,
-          phone || "N/A",
-          userRole,
-          "New Registration",
-        ]);
-
-        res.json({
-          success: true,
-          message: "Account created successfully",
-          token,
-        });
+    db.run(sql, params, async function (err) {
+      if (err) {
+        console.error("Registration error:", err.message);
+        return res
+          .status(409)
+          .json({ error: "Username, email, or phone already exists." });
       }
-    );
+
+      // ✅ Create JWT token
+      const token = jwt.sign(
+        { id: this.lastID, username, email, role: userRole },
+        JWT_SECRET,
+        { expiresIn: "7d" }
+      );
+
+      // ✅ Log signup to Google Sheets
+      await logToGoogleSheet([
+        "🆕 New Registration",
+        username,
+        email,
+        phone || "N/A",
+        userRole,
+        new Date().toLocaleString(),
+      ]);
+
+      // ✅ Response
+      res.json({
+        success: true,
+        message: "Account created successfully.",
+        token,
+      });
+    });
   } catch (error) {
     console.error("Register error:", error);
-    res.status(500).json({ error: "Server error during registration" });
+    res.status(500).json({ error: "Server error during registration." });
   }
 });
 
@@ -297,7 +441,9 @@ app.post("/auth/login", async (req, res) => {
   }
 });
 
-// Report device
+// ==============================
+// ✅ REPORT DEVICE (Logs to Google Sheet)
+// ==============================
 app.post(
   "/report-device",
   upload.fields([{ name: "proof_path" }, { name: "police_report_path" }]),
@@ -309,52 +455,79 @@ app.post(
         device_type,
         imei,
         color,
+        storage, // optional
         location_area,
         lost_type,
         lost_datetime,
         other_details,
+        reporter_name,
         reporter_email,
+        police_case_number, // optional
       } = req.body;
 
+      // file paths
       const proof_path = req.files?.proof_path?.[0]?.path || null;
       const police_path = req.files?.police_report_path?.[0]?.path || null;
 
+      // Basic validation
+      if (!imei || !device_type || !reporter_email) {
+        return res.status(400).json({
+          error: "IMEI, device type, and reporter email are required.",
+        });
+      }
+
+      // Save to database
       db.run(
-        `INSERT INTO devices (user_id, device_category, device_type, imei, color, location_area,
-          lost_type, proof_path, police_report_path, lost_datetime, other_details)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO devices 
+          (user_id, device_category, device_type, imei, color, storage, location_area, lost_type, proof_path, police_report_path, lost_datetime, other_details, reporter_email, police_case_number, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
         [
           user_id,
           device_category,
           device_type,
           imei,
           color,
+          storage,
           location_area,
           lost_type,
           proof_path,
           police_path,
           lost_datetime,
           other_details,
+          reporter_email,
+          police_case_number,
         ],
         async function (err) {
-          if (err)
-            return res.status(500).json({ error: "Failed to report device" });
+          if (err) {
+            console.error("❌ DB Insert Error:", err.message);
+            return res.status(500).json({ error: "Failed to report device." });
+          }
 
+          const reportedAt = new Date().toLocaleString();
+
+          // ✅ Log to Google Sheets — match your columns exactly
           await logToGoogleSheet([
             imei,
-            device_type,
-            color,
-            location_area,
-            reporter_email || "N/A",
-            lost_type,
+            device_type,              // Device Name column
+            color || "N/A",
+            storage || "N/A",
+            location_area || "N/A",
+            reporter_name || "N/A",
+            reporter_email,
+            reportedAt,
+            police_case_number || "N/A",
           ]);
 
-          res.json({ success: true, id: this.lastID });
+          res.json({
+            success: true,
+            message: "Device reported successfully.",
+            id: this.lastID,
+          });
         }
       );
     } catch (error) {
-      console.error("Report-device error:", error.message);
-      res.status(500).json({ error: "Server error while reporting device" });
+      console.error("❌ Report-device error:", error.message);
+      res.status(500).json({ error: "Server error while reporting device." });
     }
   }
 );
@@ -434,6 +607,31 @@ io.on("connection", (socket) => {
   socket.on("disconnect", () => console.log("Disconnected:", socket.id));
 });
 
+// ======================================
+// ✅ JWT verification middleware
+// ======================================
+function verifyToken(req, res, next) {
+  const header = req.headers.authorization;
+  if (!header) return res.status(401).json({ error: "No token provided" });
+
+  const token = header.split(" ")[1];
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded; // { id, email, role }
+    next();
+  } catch (err) {
+    return res.status(403).json({ error: "Invalid token" });
+  }
+}
+
+// ======================================
+// ✅ Import and Attach Admin Routes
+// ======================================
+app.use("/admin", verifyToken, adminRoutes);
+
+// ======================================
+// ✅ Start HTTP + WebSocket Server
+// ======================================
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 PASEARCH backend + WebSocket running on port ${PORT}`);
 });
