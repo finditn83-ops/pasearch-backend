@@ -210,8 +210,11 @@ app.get("/api/health", (_, res) =>
 app.post("/auth/register", async (req, res) => {
   try {
     const { username, email, phone, password, role } = req.body;
-    if (!username || !email || !password)
-      return res.status(400).json({ error: "All fields required" });
+if (!username || !email || !phone || !password) {
+  return res
+    .status(400)
+    .json({ error: "Username, email, phone, and password are required." });
+}
 
     const userRole = email === ADMIN_EMAIL ? "admin" : role || "reporter";
     const hashed = await bcrypt.hash(password, 10);
