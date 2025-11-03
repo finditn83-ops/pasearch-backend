@@ -532,7 +532,9 @@ app.post(
   }
 );
 
-// Track device
+// ==============================
+// ✅ TRACK DEVICE (with live socket + Google Sheets log)
+// ==============================
 app.post("/track-device", async (req, res) => {
   try {
     const { imei, latitude, longitude, address, trackerName } = req.body;
@@ -543,16 +545,33 @@ app.post("/track-device", async (req, res) => {
        VALUES (?, ?, ?, ?, ?, ?)`,
       [imei, latitude, longitude, address, trackerName, trackedAt],
       async function (err) {
-        if (err)
+        if (err) {
+          console.error("❌ Database insert failed:", err);
           return res.status(500).json({ error: "Database insert failed" });
+        }
 
+        // ✅ Log to Google Sheet (optional)
         await logToGoogleSheet([
+          "TRACK",
           imei,
           trackerName || "Unknown",
           latitude,
           longitude,
           address,
+          trackedAt,
         ]);
+
+        // ✅ Emit live tracking update to Police/Admin dashboards
+        io.emit("tracking_update", {
+          imei,
+          latitude,
+          longitude,
+          address,
+          trackerName,
+          trackedAt,
+        });
+
+        console.log("📡 Live tracking update emitted:", imei);
 
         res.json({
           success: true,
@@ -561,7 +580,7 @@ app.post("/track-device", async (req, res) => {
       }
     );
   } catch (err) {
-    console.error("Track-device error:", err.message);
+    console.error("❌ Track-device error:", err.message);
     res.status(500).json({ error: "Failed to track device" });
   }
 });
