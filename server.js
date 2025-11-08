@@ -62,6 +62,71 @@ async function logToGoogleSheet(dataRow) {
   }
 }
 
+// ======================================
+// ✅ Log Login Activity to Google Sheets
+// ======================================
+async function logLoginActivityToSheet({
+  username,
+  role,
+  city,
+  country,
+  ip,
+  localTime,
+  utcTime,
+}) {
+  try {
+    const auth = new google.auth.GoogleAuth({
+      keyFile: process.env.GOOGLE_SERVICE_ACCOUNT_PATH,
+      scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+    });
+    const sheets = google.sheets({ version: "v4", auth });
+
+    const now = new Date().toLocaleString();
+    const values = [
+      [username, role, city, country, ip, localTime, utcTime, now],
+    ];
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: process.env.GOOGLE_SHEET_ID,
+      range: "LoginActivity!A1",
+      valueInputOption: "USER_ENTERED",
+      requestBody: { values },
+    });
+
+    console.log(`✅ Logged login activity for ${username} (${role})`);
+  } catch (err) {
+    console.error("❌ Failed to log login activity:", err.message);
+  }
+}
+
+// ======================================
+// 🚫 Log Failed Login Attempts to Google Sheets
+// ======================================
+async function logFailedLoginAttempt({ username, ip, city, country, reason }) {
+  try {
+    const auth = new google.auth.GoogleAuth({
+      keyFile: process.env.GOOGLE_SERVICE_ACCOUNT_PATH,
+      scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+    });
+    const sheets = google.sheets({ version: "v4", auth });
+
+    const time = new Date().toLocaleString();
+    const values = [[username, ip, city, country, time, reason]];
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: process.env.GOOGLE_SHEET_ID,
+      range: "LoginAttempts!A1",
+      valueInputOption: "USER_ENTERED",
+      requestBody: { values },
+    });
+
+    console.log(`🚫 Logged failed login attempt for ${username}`);
+  } catch (err) {
+    console.error("❌ Failed to log failed attempt:", err.message);
+  }
+}
+
+
 // ==============================
 // ✅ GOOGLE SHEETS HELPER FOR ADMIN UPDATES
 // ==============================
@@ -328,6 +393,31 @@ app.get("/api/health", (_, res) =>
   })
 );
 
+// =======================================
+// ✅ POST /log-login — Log login to Google Sheets
+// =======================================
+app.post("/log-login", async (req, res) => {
+  const { username, role, city, country, ip, localTime, utcTime } = req.body;
+
+  try {
+    await logLoginActivityToSheet({
+      username,
+      role,
+      city,
+      country,
+      ip,
+      localTime,
+      utcTime,
+    });
+
+    res.json({ success: true, message: "Login logged successfully" });
+  } catch (err) {
+    console.error("❌ Login logging error:", err.message);
+    res.status(500).json({ error: "Failed to log login" });
+  }
+});
+
+
 // ==============================
 // ✅ REGISTER USER
 // ==============================
@@ -399,44 +489,106 @@ app.post("/auth/register", async (req, res) => {
   }
 });
 
-// Login user
-app.post("/auth/login", async (req, res) => {
+// ======================================
+// ⚙️ Helper to log failed login attempts (with IP)
+// ======================================
+async function logFailedLogin(username, reason) {
   try {
-    const { email, username, password } = req.body;
-    const identifier = email || username;
-    if (!identifier || !password)
-      return res
-        .status(400)
-        .json({ error: "Email/Username and password required" });
+    // Import node-fetch dynamically (works even on Render)
+    const fetch = (await import("node-fetch")).default;
 
-    db.get(
-      "SELECT * FROM users WHERE email = ? OR username = ?",
-      [identifier, identifier],
-      async (err, user) => {
-        if (err) return res.status(500).json({ error: "Database error" });
-        if (!user)
-          return res.status(401).json({ error: "Invalid credentials" });
+    // 🌍 Get IP + location info
+    const ipRes = await fetch("https://ipapi.co/json/");
+    const ipData = await ipRes.json();
 
-        const isMatch = await bcrypt.compare(password, user.password);
-        if (!isMatch)
-          return res.status(401).json({ error: "Invalid credentials" });
+    const city = ipData.city || "Unknown";
+    const country = ipData.country_name || "Unknown";
+    const ip = ipData.ip || "N/A";
 
-        const token = jwt.sign(
-          { id: user.id, email: user.email, role: user.role },
-          JWT_SECRET,
-          { expiresIn: "7d" }
-        );
+    // 🚫 Send the data to Google Sheet
+    await logFailedLoginAttempt({ username, ip, city, country, reason });
 
-        res.json({
-          success: true,
-          message: "Login successful",
-          token,
-          user,
-        });
-      }
-    );
+    console.log(`🚫 Logged failed login for ${username} (${reason})`);
   } catch (err) {
-    console.error("Login error:", err);
+    console.warn("⚠️ Failed login logging skipped:", err.message);
+  }
+}
+
+// ==========================
+// 🔐 LOGIN USER (Final Version)
+// ==========================
+app.post("/auth/login", async (req, res) => {
+  const { username, password } = req.body;
+
+  try {
+    db.get("SELECT * FROM users WHERE username = ?", [username], async (err, user) => {
+      if (err) {
+        console.error("❌ DB error during login:", err.message);
+        return res.status(500).json({ error: "Database error" });
+      }
+
+      // 🚫 User not found
+      if (!user) {
+        await logFailedLogin(username, "User not found");
+        return res.status(400).json({ error: "Invalid username or password." });
+      }
+
+      // 2️⃣ Verify password
+      const isMatch = await bcrypt.compare(password, user.password);
+      if (!isMatch) {
+        await logFailedLogin(username, "Incorrect password");
+        return res.status(400).json({ error: "Invalid username or password." });
+      }
+
+      // 3️⃣ Generate JWT token
+      const token = jwt.sign(
+        { id: user.id, role: user.role, username: user.username },
+        JWT_SECRET,
+        { expiresIn: "7d" }
+      );
+
+      // 4️⃣ Log successful login to Google Sheets
+      try {
+        const fetch = (await import("node-fetch")).default;
+        const ipRes = await fetch("https://ipapi.co/json/");
+        const ipData = await ipRes.json();
+
+        const city = ipData.city || "Unknown";
+        const country = ipData.country_name || "Unknown";
+        const ip = ipData.ip || "N/A";
+        const now = new Date();
+        const localTime = now.toLocaleString();
+        const utcTime = now.toUTCString();
+
+        await logLoginActivityToSheet({
+          username: user.username,
+          role: user.role,
+          city,
+          country,
+          ip,
+          localTime,
+          utcTime,
+        });
+      } catch (err) {
+        console.warn("⚠️ Login activity logging skipped:", err.message);
+      }
+
+      // 5️⃣ Return success
+      res.json({
+        token,
+        user: {
+          id: user.id,
+          username: user.username,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+        },
+      });
+
+      console.log(`✅ ${user.username} (${user.role}) logged in successfully`);
+    });
+  } catch (error) {
+    console.error("❌ Login route error:", error);
     res.status(500).json({ error: "Server error during login" });
   }
 });
