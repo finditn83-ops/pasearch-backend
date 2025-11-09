@@ -758,6 +758,15 @@ app.post("/trigger-frontend", async (req, res) => {
 });
 
 // =====================
+// IMPORT ROUTES
+// =====================
+const adminRoutes = require("./routes/admin");
+app.use("/admin", adminRoutes);
+
+const authRoutes = require("./routes/auth");
+app.use("/auth", authRoutes);
+
+// =====================
 // DEFAULT ROUTE
 // =====================
 app.get("/", (_, res) => res.send("Welcome to PASEARCH Backend ✅"));
