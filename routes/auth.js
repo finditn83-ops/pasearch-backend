@@ -23,7 +23,7 @@ const transporter = nodemailer.createTransport({
 });
 
 // =============================================================
-// 🧩 1️⃣  Forgot Password — Send OTP
+// 🧩 1️⃣ Forgot Password — Send OTP
 // =============================================================
 router.post("/forgot-password", async (req, res) => {
   const { email } = req.body;
@@ -31,24 +31,29 @@ router.post("/forgot-password", async (req, res) => {
 
   db.get("SELECT * FROM users WHERE email = ?", [email], async (err, user) => {
     if (err) return res.status(500).json({ error: "Database error" });
-    if (!user) return res.status(404).json({ error: "No user found with that email" });
+    if (!user)
+      return res.status(404).json({ error: "No user found with that email." });
 
     // Generate a 6-digit OTP
     const otp = Math.floor(100000 + Math.random() * 900000);
     const expiresAt = Date.now() + 10 * 60 * 1000; // 10 min expiry
 
-    // Save OTP to DB
+    // Create OTP table if not exists
     db.run(
       "CREATE TABLE IF NOT EXISTS otps (email TEXT, otp TEXT, expires_at INTEGER)"
     );
-    db.run("DELETE FROM otps WHERE email = ?", [email]); // remove old OTPs
+
+    // Delete old OTPs
+    db.run("DELETE FROM otps WHERE email = ?", [email]);
+
+    // Insert new OTP
     db.run("INSERT INTO otps (email, otp, expires_at) VALUES (?, ?, ?)", [
       email,
-      otp,
+      otp.toString(),
       expiresAt,
     ]);
 
-    // Send Email
+    // Send OTP Email
     try {
       await transporter.sendMail({
         from: `"PASEARCH Support" <${process.env.ADMIN_EMAIL}>`,
@@ -72,37 +77,50 @@ router.post("/forgot-password", async (req, res) => {
 });
 
 // =============================================================
-// 🧩 2️⃣  Verify OTP
+// 🧩 2️⃣ Verify OTP
 // =============================================================
 router.post("/verify-otp", async (req, res) => {
   const { email, otp } = req.body;
   if (!email || !otp)
     return res.status(400).json({ error: "Email and OTP are required" });
 
-  db.get("SELECT * FROM otps WHERE email = ? AND otp = ?", [email, otp], (err, row) => {
-    if (err) return res.status(500).json({ error: "Database error" });
-    if (!row) return res.status(400).json({ error: "Invalid OTP" });
-    if (Date.now() > row.expires_at)
-      return res.status(400).json({ error: "OTP expired" });
+  db.get(
+    "SELECT * FROM otps WHERE email = ? AND otp = ?",
+    [email, otp.toString()],
+    (err, row) => {
+      if (err) return res.status(500).json({ error: "Database error" });
+      if (!row) return res.status(400).json({ error: "Invalid OTP" });
 
-    res.json({ message: "OTP verified successfully" });
-  });
+      if (Date.now() > row.expires_at)
+        return res.status(400).json({ error: "OTP expired" });
+
+      res.json({ message: "OTP verified successfully" });
+    }
+  );
 });
 
 // =============================================================
-// 🧩 3️⃣  Reset Password
+// 🧩 3️⃣ Reset Password
 // =============================================================
 router.post("/reset-password", async (req, res) => {
   const { email, newPassword } = req.body;
   if (!email || !newPassword)
-    return res.status(400).json({ error: "Email and new password are required" });
+    return res
+      .status(400)
+      .json({ error: "Email and new password are required" });
 
   const hashed = await bcrypt.hash(newPassword, 10);
 
-  db.run("UPDATE users SET password = ? WHERE email = ?", [hashed, email], (err) => {
-    if (err) return res.status(500).json({ error: "Database update failed" });
-    res.json({ message: "Password reset successfully! You can now log in." });
-  });
+  db.run(
+    "UPDATE users SET password = ? WHERE email = ?",
+    [hashed, email],
+    (err) => {
+      if (err) return res.status(500).json({ error: "Database update failed" });
+      res.json({
+        message: "Password reset successfully! You can now log in.",
+      });
+    }
+  );
 });
 
 module.exports = router;
