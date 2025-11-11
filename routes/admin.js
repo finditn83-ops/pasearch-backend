@@ -1,7 +1,32 @@
+// =====================
+// 📂 ADMIN ROUTES (with file upload support)
+// =====================
 const express = require("express");
 const router = express.Router();
 const sqlite3 = require("sqlite3").verbose();
-const db = new sqlite3.Database("devices.db");
+
+// ✅ Connect to SQLite database
+const db = new sqlite3.Database("devices.db", (err) => {
+  if (err) console.error("❌ DB error:", err.message);
+  else console.log("✅ Admin routes connected to SQLite DB.");
+});
+
+// ✅ Import global upload from server.js
+const { upload } = require("../server"); // 👈 this fixes "upload is not defined"
+
+// Example: handle admin file upload
+router.post("/upload-proof", upload.single("proof"), (req, res) => {
+  try {
+    console.log("File uploaded by admin:", req.file);
+    res.json({
+      message: "✅ File uploaded successfully!",
+      file: req.file.filename,
+    });
+  } catch (err) {
+    console.error("❌ Upload failed:", err.message);
+    res.status(500).json({ error: "Upload failed" });
+  }
+});
 
 // ✅ IMPORT GOOGLE SHEET HELPERS
 const { logToGoogleSheetInAdminTab, logToGoogleSheetInPoliceTab } = require("../sheetsHelper");
@@ -200,4 +225,5 @@ router.get("/police-updates", requireAdmin, (req, res) => {
   );
 });
 
+// Export router
 module.exports = router;
