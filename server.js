@@ -45,13 +45,54 @@ const INTEL_SOURCES = (process.env.INTEL_SOURCES ||
   .filter(Boolean);
 
 // =============================================================
-// APP INIT + CORS
+// APP INIT
 // =============================================================
 const app = express();
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
+
+// =============================================================
+// 🌐 CORS CONFIGURATION — Local + Render + Vercel
+// =============================================================
+const allowedOrigins = [
+  "http://localhost:5173",
+  "http://localhost:3000",
+  "https://pasearch-frontend.vercel.app", // ✅ your live frontend
+];
+
+// 👇 Allow extra preview domains (optional)
+if (process.env.CORS_EXTRA_ORIGINS) {
+  const extras = process.env.CORS_EXTRA_ORIGINS.split(",").map((o) => o.trim());
+  allowedOrigins.push(...extras);
+}
+
+const ALLOWED = new Set(allowedOrigins);
+
+app.use(
+  cors({
+    origin: (origin, cb) => {
+      if (!origin) return cb(null, true);
+
+      try {
+        const hostname = new URL(origin).hostname;
+        const ok =
+          ALLOWED.has(origin) ||
+          /\.vercel\.app$/.test(hostname) ||
+          hostname.endsWith(".onrender.com");
+
+        if (ok) return cb(null, true);
+        console.warn("🚫 Blocked CORS origin:", origin);
+        cb(new Error("CORS blocked"));
+      } catch (err) {
+        cb(new Error("Invalid CORS origin"));
+      }
+    },
+    credentials: true,
+  })
+);
+
+// ✅ Ensure upload folder exists
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-app.use(cors({ origin: "*", credentials: true }));
 
 // =============================================================
 // DB
