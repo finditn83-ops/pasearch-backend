@@ -640,6 +640,24 @@ app.post("/ai/ask", async (req, res) => {
 });
 
 // =============================================================
+// ROUTES
+// =============================================================
+
+// ✅ Import your new AI routes
+const aiRoutes = require("./routes/aiIntel");
+app.use("/ai", aiRoutes);
+
+// ✅ Import other route modules
+const adminRoutes = require("./routes/admin");
+const authRoutes = require("./routes/auth");
+
+app.use("/admin", adminRoutes);
+app.use("/auth", authRoutes);
+
+// Default route
+app.get("/", (_, res) => res.send("Welcome to PASEARCH Backend ✅"));
+
+// =============================================================
 // START SERVER
 // =============================================================
 server.listen(PORT, "0.0.0.0", () => {
