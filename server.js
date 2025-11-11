@@ -554,9 +554,6 @@ setInterval(() => {
 // ======================================================
 import fetch from "node-fetch"; // if you're using ES modules; otherwise use require() below
 
-// If your server.js uses require() syntax (most do), then use this instead:
-const fetch = (...args) => import("node-fetch").then(({ default: fetch }) => fetch(...args));
-
 app.post("/ai/ask", async (req, res) => {
   const { query } = req.body;
   if (!query) return res.status(400).json({ answer: "No question provided." });
