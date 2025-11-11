@@ -1,10 +1,8 @@
 // =============================================================
-// 🚀 PASEARCH BACKEND (Express + SQLite + Google Sheets + Render/Vercel)
+// 🚀 PASEARCH BACKEND — Locate, Track & Recover Devices
+// + PASEARCH AI (RAG + Voice) + Cyber Intel Crawler + Admin News Feed
 // =============================================================
 
-// =====================
-// IMPORTS & CONFIG
-// =====================
 const express = require("express");
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
@@ -17,173 +15,48 @@ const fs = require("fs");
 const http = require("http");
 const { Server } = require("socket.io");
 const { google } = require("googleapis");
-const fetch = (...args) =>
-  import("node-fetch").then(({ default: fetch }) => fetch(...args));
-
+const fetch = (...args) => import("node-fetch").then(({ default: f }) => f(...args));
+const OpenAI = require("openai");
+const RSSParser = require("rss-parser");
 require("dotenv").config();
 
-// =====================
-// ✅ MULTER FILE UPLOAD HANDLER
-// =====================
-const multer = require("multer");
-const path = require("path");
-const fs = require("fs");
-
-const UPLOAD_DIR = path.join(__dirname, "uploads");
-if (!fs.existsSync(UPLOAD_DIR)) {
-  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-  console.log("📁 Created uploads folder at:", UPLOAD_DIR);
-}
-
-const storage = multer.diskStorage({
-  destination: (_, __, cb) => cb(null, UPLOAD_DIR),
-  filename: (_, file, cb) => {
-    const safeName = Date.now() + "-" + file.originalname.replace(/\s+/g, "_");
-    cb(null, safeName);
-  },
-});
-
-const upload = multer({ storage });
-
-// ==========================
-// ✅ GOOGLE SHEETS CONNECTION CHECK
-// ==========================
-if (
-  process.env.GOOGLE_SHEET_ID &&
-  (process.env.GOOGLE_SERVICE_ACCOUNT_PATH || process.env.GOOGLE_SERVICE_ACCOUNT_JSON)
-) {
-  console.log(`✅ Google Sheets logging enabled (Sheet ID: ${process.env.GOOGLE_SHEET_ID})`);
-} else {
-  console.warn("⚠️ Google Sheets disabled: Missing credentials or sheet ID");
-}
-
-// ==========================
-// ✅ GOOGLE SHEETS UNIVERSAL AUTH
-// ==========================
-async function getGoogleAuth() {
-  try {
-    if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
-      const creds = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
-      return new google.auth.GoogleAuth({
-        credentials: creds,
-        scopes: ["https://www.googleapis.com/auth/spreadsheets"],
-      });
-    }
-
-    const keyFile = process.env.GOOGLE_SERVICE_ACCOUNT_PATH || "./service-account.json";
-    if (!fs.existsSync(keyFile))
-      throw new Error(`Missing Google key file at: ${keyFile}`);
-
-    return new google.auth.GoogleAuth({
-      keyFile,
-      scopes: ["https://www.googleapis.com/auth/spreadsheets"],
-    });
-  } catch (err) {
-    console.error("❌ Google Auth Error:", err.message);
-    throw err;
-  }
-}
-
-// ==========================
-// ✅ GENERIC SHEET APPENDER
-// ==========================
-async function appendToSheet(tabName, dataRow) {
-  try {
-    const auth = await getGoogleAuth();
-    const sheets = google.sheets({ version: "v4", auth });
-    const timestamp = new Date().toLocaleString();
-    const row = [...dataRow, timestamp];
-
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: process.env.GOOGLE_SHEET_ID,
-      range: `${tabName}!A1`,
-      valueInputOption: "USER_ENTERED",
-      requestBody: { values: [row] },
-    });
-
-    console.log(`✅ Logged to ${tabName}:`, row);
-  } catch (err) {
-    console.error(`❌ Failed to log to ${tabName}:`, err.message);
-  }
-}
-
-// ==========================
-// ✅ SPECIFIC LOGGING HELPERS
-// ==========================
-const logToGoogleSheet = (dataRow) => appendToSheet("Sheet1", dataRow);
-const logLoginActivityToSheet = (info) =>
-  appendToSheet("LoginActivity", [
-    info.username,
-    info.role,
-    info.city,
-    info.country,
-    info.ip,
-    info.localTime,
-    info.utcTime,
-  ]);
-const logFailedLoginAttempt = (info) =>
-  appendToSheet("LoginAttempts", [
-    info.username,
-    info.ip,
-    info.city,
-    info.country,
-    info.reason,
-  ]);
-const logToGoogleSheetInAdminTab = (dataRow) => appendToSheet("AdminUpdates", dataRow);
-const logToGoogleSheetInPoliceTab = (dataRow) => appendToSheet("PoliceUpdates", dataRow);
-
-// =====================
-// EXPRESS + CORS
-// =====================
-const app = express();
-app.use(express.json({ limit: "10mb" }));
-app.use(express.urlencoded({ extended: true }));
-
-const extraOriginsEnv = process.env.CORS_EXTRA_ORIGINS || "";
-const extraOrigins = extraOriginsEnv
-  ? extraOriginsEnv.split(",").map((s) => s.trim()).filter(Boolean)
-  : [];
-
-const allowedOrigins = [
-  "http://localhost:5173",
-  "http://localhost:3000",
-  "https://pasearch-frontend.vercel.app",
-  ...extraOrigins,
-];
-const ALLOWED = new Set(allowedOrigins);
-
-app.use(
-  cors({
-    origin: (origin, cb) => {
-      if (!origin) return cb(null, true);
-      const ok =
-        ALLOWED.has(origin) ||
-        /\.vercel\.app$/.test(new URL(origin).hostname);
-      cb(ok ? null : new Error("CORS blocked"), ok);
-    },
-    credentials: true,
-  })
-);
-
-// =====================
-// CONFIG
-// =====================
+// =============================================================
+// ⚙️ CONFIG
+// =============================================================
+const PORT = process.env.PORT || 5000;
 const DB_PATH = path.join(__dirname, "devices.db");
 const UPLOAD_DIR = path.join(__dirname, "uploads");
 const JWT_SECRET = process.env.JWT_SECRET || "dev_secret";
-const PORT = process.env.PORT || 5000;
-const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "finditn83@gmail.com";
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "admin@example.com";
+const TELEMETRY_API_KEY = process.env.TELEMETRY_API_KEY || "telemetry_key";
+const OPENAI_KEY = process.env.OPENAI_API_KEY || "";
+const AI_MODEL = process.env.AI_MODEL || "gpt-4o-mini";
+const EMBED_MODEL = process.env.EMBED_MODEL || "text-embedding-3-small";
+const INTEL_REFRESH_MINUTES = Number(process.env.INTEL_REFRESH_MINUTES || 180);
+const INTEL_SOURCES = (process.env.INTEL_SOURCES ||
+  [
+    "https://krebsonsecurity.com/feed/",
+    "https://www.bleepingcomputer.com/feed/",
+    "https://www.schneier.com/feed/atom/",
+    "https://feeds.feedburner.com/TheHackersNews",
+  ].join(","))
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
 
-// =====================
-// DB INITIALIZATION
-// =====================
+// =============================================================
+// APP INIT + CORS
+// =============================================================
+const app = express();
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true }));
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+app.use(cors({ origin: "*", credentials: true }));
 
-const db = new sqlite3.Database(DB_PATH, (err) => {
-  if (err) console.error("❌ DB error:", err.message);
-  else console.log("✅ Connected to SQLite database.");
-});
-
+// =============================================================
+// DB
+// =============================================================
+const db = new sqlite3.Database(DB_PATH);
 db.serialize(() => {
   db.run(`CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -192,29 +65,24 @@ db.serialize(() => {
     phone TEXT,
     password TEXT,
     role TEXT,
-    verified INTEGER DEFAULT 0,
-    reset_token TEXT,
-    reset_expires INTEGER,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
 
   db.run(`CREATE TABLE IF NOT EXISTS devices (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER,
-    device_category TEXT,
     device_type TEXT,
     imei TEXT,
     color TEXT,
     location_area TEXT,
     lost_type TEXT,
-    proof_path TEXT,
-    police_report_path TEXT,
     lost_datetime TEXT,
-    other_details TEXT,
+    reporter_email TEXT,
+    police_case_number TEXT,
     status TEXT DEFAULT 'reported',
-    recovered_at TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY(user_id) REFERENCES users(id)
+    frozen INTEGER DEFAULT 0,
+    last_seen DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
 
   db.run(`CREATE TABLE IF NOT EXISTS tracking (
@@ -227,477 +95,411 @@ db.serialize(() => {
     trackedAt TEXT
   )`);
 
-  db.run(`CREATE TABLE IF NOT EXISTS system_logs (
+  db.run(`CREATE TABLE IF NOT EXISTS device_aliases (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    action TEXT,
-    timestamp TEXT
+    device_id INTEGER,
+    alias_type TEXT,
+    alias_value TEXT,
+    first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_seen DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS cyber_intel (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT,
+    url TEXT UNIQUE,
+    source TEXT,
+    published_at TEXT,
+    summary TEXT,
+    embedding TEXT,             -- JSON array string
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
 });
 
-// =====================
-// ✅ MULTER FILE UPLOAD HANDLER (Global Export)
-// =====================
-const multer = require("multer");
-const path = require("path");
-const fs = require("fs");
-
-// Define uploads folder
-const UPLOAD_DIR = path.join(__dirname, "uploads");
-if (!fs.existsSync(UPLOAD_DIR)) {
-  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-  console.log("📁 Created uploads folder at:", UPLOAD_DIR);
-}
-
-// Configure storage engine
+// =============================================================
+// UPLOADS
+// =============================================================
 const storage = multer.diskStorage({
   destination: (_, __, cb) => cb(null, UPLOAD_DIR),
-  filename: (_, file, cb) => {
-    // Replace spaces with underscores to avoid path issues
-    const safeName = Date.now() + "-" + file.originalname.replace(/\s+/g, "_");
-    cb(null, safeName);
-  },
+  filename: (_, file, cb) => cb(null, Date.now() + "-" + file.originalname.replace(/\s+/g, "_")),
 });
-
-// Initialize multer
 const upload = multer({ storage });
 
-// ✅ Export it for other route files to use
-module.exports.upload = upload;
+// =============================================================
+// EMAIL
+// =============================================================
+let transporter = null;
+if (process.env.SMTP_USER && process.env.SMTP_PASS && process.env.SMTP_HOST) {
+  transporter = nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: Number(process.env.SMTP_PORT) || 465,
+    secure: Number(process.env.SMTP_PORT || 465) === 465,
+    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+  });
+}
+async function sendEmail(to, subject, html) {
+  if (!transporter) return;
+  try {
+    await transporter.sendMail({ from: process.env.SMTP_FROM, to, subject, html });
+  } catch (e) {
+    console.warn("Email error:", e.message);
+  }
+}
 
-// =====================
-// ROUTES
-// =====================
+// =============================================================
+// GOOGLE SHEETS
+// =============================================================
+async function getAuth() {
+  let creds;
+  if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON)
+    creds = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+  else if (process.env.GOOGLE_SERVICE_ACCOUNT_PATH)
+    creds = require(process.env.GOOGLE_SERVICE_ACCOUNT_PATH);
+  if (!creds) return null;
+  return new google.auth.GoogleAuth({
+    credentials: creds,
+    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+  });
+}
+async function logToSheet(values, range = "Sheet1!A1") {
+  if (!process.env.GOOGLE_SHEET_ID) return;
+  const auth = await getAuth();
+  if (!auth) return;
+  const sheets = google.sheets({ version: "v4", auth });
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: process.env.GOOGLE_SHEET_ID,
+    range,
+    valueInputOption: "USER_ENTERED",
+    requestBody: { values: [values] },
+  });
+}
 
-// Health check
-app.get("/api/health", (_, res) =>
+// =============================================================
+// HELPERS (AUTH + TELEMETRY KEY)
+// =============================================================
+function verifyToken(req, res, next) {
+  const t = req.headers.authorization?.split(" ")[1];
+  if (!t) return res.status(401).json({ error: "No token" });
+  try {
+    req.user = jwt.verify(t, JWT_SECRET);
+    next();
+  } catch {
+    res.status(403).json({ error: "Invalid token" });
+  }
+}
+function requireTelemetryKey(req, res, next) {
+  const key = req.headers["x-pasearch-key"];
+  if (key !== TELEMETRY_API_KEY) return res.status(401).json({ error: "Invalid API key" });
+  next();
+}
+
+// =============================================================
+// OpenAI (AI + Embeddings + TTS)
+// =============================================================
+const openai = OPENAI_KEY ? new OpenAI({ apiKey: OPENAI_KEY }) : null;
+
+async function embedText(text) {
+  if (!openai) return null;
+  const r = await openai.embeddings.create({
+    model: EMBED_MODEL,
+    input: text.slice(0, 3000),
+  });
+  return r.data[0].embedding;
+}
+function cosine(a, b) {
+  if (!a || !b || a.length !== b.length) return 0;
+  let dot = 0,
+    na = 0,
+    nb = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    na += a[i] * a[i];
+    nb += b[i] * b[i];
+  }
+  return dot / (Math.sqrt(na) * Math.sqrt(nb) + 1e-9);
+}
+
+// =============================================================
+// SERVER + SOCKET.IO
+// =============================================================
+const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: "*"} });
+
+// =============================================================
+// CORE ROUTES
+// =============================================================
+app.get("/", (_, res) =>
   res.json({
-    ok: true,
-    message: "Backend reachable ✅",
     service: "PASEARCH Backend",
-    time: new Date().toISOString(),
+    ai: !!openai,
+    mission: "Locate, track & recover devices (IMEI-change resilient)",
   })
 );
 
-// =======================================
-// ✅ POST /log-login — Log login to Google Sheets
-// =======================================
-app.post("/log-login", async (req, res) => {
-  const { username, role, city, country, ip, localTime, utcTime } = req.body;
-
-  try {
-    await logLoginActivityToSheet({
-      username,
-      role,
-      city,
-      country,
-      ip,
-      localTime,
-      utcTime,
-    });
-
-    res.json({ success: true, message: "Login logged successfully" });
-  } catch (err) {
-    console.error("❌ Login logging error:", err.message);
-    res.status(500).json({ error: "Failed to log login" });
-  }
-});
-
-
-// ==============================
-// ✅ REGISTER USER
-// ==============================
+// Auth: register/login
 app.post("/auth/register", async (req, res) => {
-  try {
-    const { username, email, phone, password, role } = req.body;
-
-    // 🔒 Basic validation
-    if (!username || !email || !phone || !password) {
-      return res.status(400).json({
-        error: "Username, email, phone, and password are required.",
-      });
+  const { username, email, password, role, phone } = req.body;
+  if (!username || !email || !password) return res.status(400).json({ error: "Missing fields" });
+  const hash = await bcrypt.hash(password, 10);
+  const r = email === ADMIN_EMAIL ? "admin" : role || "reporter";
+  db.run(
+    "INSERT INTO users (username,email,phone,password,role) VALUES (?,?,?,?,?)",
+    [username, email, phone || null, hash, r],
+    async function (err) {
+      if (err) return res.status(400).json({ error: "User exists" });
+      const token = jwt.sign({ id: this.lastID, username, role: r }, JWT_SECRET, { expiresIn: "7d" });
+      await logToSheet(["REGISTER", username, email, r, new Date().toLocaleString()]);
+      res.json({ success: true, token });
     }
-
-    // 👑 Auto-assign admin role if email matches ENV admin email
-    const userRole = email === process.env.ADMIN_EMAIL ? "admin" : role || "reporter";
-
-    // 🔑 Hash password
-    const hashed = await bcrypt.hash(password, 10);
-
-    // 🗄️ Insert user into database
-    const sql =
-      "INSERT INTO users (username, email, phone, password, role, verified, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)";
-    const params = [
-      username,
-      email,
-      phone,
-      hashed,
-      userRole,
-      0, // not verified by default
-      new Date().toLocaleString(),
-    ];
-
-    db.run(sql, params, async function (err) {
-      if (err) {
-        console.error("Registration error:", err.message);
-        return res
-          .status(409)
-          .json({ error: "Username, email, or phone already exists." });
-      }
-
-      // ✅ Create JWT token
-      const token = jwt.sign(
-        { id: this.lastID, username, email, role: userRole },
-        JWT_SECRET,
-        { expiresIn: "7d" }
-      );
-
-      // ✅ Log signup to Google Sheets
-      await logToGoogleSheet([
-        "🆕 New Registration",
-        username,
-        email,
-        phone || "N/A",
-        userRole,
-        new Date().toLocaleString(),
-      ]);
-
-      // ✅ Response
-      res.json({
-        success: true,
-        message: "Account created successfully.",
-        token,
-      });
-    });
-  } catch (error) {
-    console.error("Register error:", error);
-    res.status(500).json({ error: "Server error during registration." });
-  }
+  );
 });
-
-// ======================================
-// ⚙️ Helper to log failed login attempts (with IP)
-// ======================================
-async function logFailedLogin(username, reason) {
-  try {
-    // Import node-fetch dynamically (works even on Render)
-    const fetch = (await import("node-fetch")).default;
-
-    // 🌍 Get IP + location info
-    const ipRes = await fetch("https://ipapi.co/json/");
-    const ipData = await ipRes.json();
-
-    const city = ipData.city || "Unknown";
-    const country = ipData.country_name || "Unknown";
-    const ip = ipData.ip || "N/A";
-
-    // 🚫 Send the data to Google Sheet
-    await logFailedLoginAttempt({ username, ip, city, country, reason });
-
-    console.log(`🚫 Logged failed login for ${username} (${reason})`);
-  } catch (err) {
-    console.warn("⚠️ Failed login logging skipped:", err.message);
-  }
-}
-
-// ==========================
-// 🔐 LOGIN USER (Final Version)
-// ==========================
-app.post("/auth/login", async (req, res) => {
+app.post("/auth/login", (req, res) => {
   const { username, password } = req.body;
-
-  try {
-    db.get("SELECT * FROM users WHERE username = ?", [username], async (err, user) => {
-      if (err) {
-        console.error("❌ DB error during login:", err.message);
-        return res.status(500).json({ error: "Database error" });
-      }
-
-      // 🚫 User not found
-      if (!user) {
-        await logFailedLogin(username, "User not found");
-        return res.status(400).json({ error: "Invalid username or password." });
-      }
-
-      // 2️⃣ Verify password
-      const isMatch = await bcrypt.compare(password, user.password);
-      if (!isMatch) {
-        await logFailedLogin(username, "Incorrect password");
-        return res.status(400).json({ error: "Invalid username or password." });
-      }
-
-      // 3️⃣ Generate JWT token
-      const token = jwt.sign(
-        { id: user.id, role: user.role, username: user.username },
-        JWT_SECRET,
-        { expiresIn: "7d" }
-      );
-
-      // 4️⃣ Log successful login to Google Sheets
-      try {
-        const fetch = (await import("node-fetch")).default;
-        const ipRes = await fetch("https://ipapi.co/json/");
-        const ipData = await ipRes.json();
-
-        const city = ipData.city || "Unknown";
-        const country = ipData.country_name || "Unknown";
-        const ip = ipData.ip || "N/A";
-        const now = new Date();
-        const localTime = now.toLocaleString();
-        const utcTime = now.toUTCString();
-
-        await logLoginActivityToSheet({
-          username: user.username,
-          role: user.role,
-          city,
-          country,
-          ip,
-          localTime,
-          utcTime,
-        });
-      } catch (err) {
-        console.warn("⚠️ Login activity logging skipped:", err.message);
-      }
-
-      // 5️⃣ Return success
-      res.json({
-        token,
-        user: {
-          id: user.id,
-          username: user.username,
-          name: user.name,
-          email: user.email,
-          role: user.role,
-        },
-      });
-
-      console.log(`✅ ${user.username} (${user.role}) logged in successfully`);
-    });
-  } catch (error) {
-    console.error("❌ Login route error:", error);
-    res.status(500).json({ error: "Server error during login" });
-  }
+  db.get("SELECT * FROM users WHERE username=?", [username], async (err, u) => {
+    if (err || !u) return res.status(400).json({ error: "Invalid credentials" });
+    const ok = await bcrypt.compare(password, u.password);
+    if (!ok) return res.status(400).json({ error: "Invalid credentials" });
+    const t = jwt.sign({ id: u.id, username, role: u.role }, JWT_SECRET, { expiresIn: "7d" });
+    await logToSheet(["LOGIN", username, u.role, new Date().toLocaleString()], "Logins!A1");
+    res.json({ success: true, token: t });
+  });
 });
 
-// ==============================
-// ✅ REPORT DEVICE (Logs to Google Sheet)
-// ==============================
-app.post(
-  "/report-device",
-  upload.fields([{ name: "proof_path" }, { name: "police_report_path" }]),
-  async (req, res) => {
-    try {
-      const {
-        user_id,
-        device_category,
-        device_type,
-        imei,
-        color,
-        storage, // optional
-        location_area,
-        lost_type,
-        lost_datetime,
-        other_details,
-        reporter_name,
-        reporter_email,
-        police_case_number, // optional
-      } = req.body;
-
-      // file paths
-      const proof_path = req.files?.proof_path?.[0]?.path || null;
-      const police_path = req.files?.police_report_path?.[0]?.path || null;
-
-      // Basic validation
-      if (!imei || !device_type || !reporter_email) {
-        return res.status(400).json({
-          error: "IMEI, device type, and reporter email are required.",
-        });
-      }
-
-      // Save to database
-      db.run(
-        `INSERT INTO devices 
-          (user_id, device_category, device_type, imei, color, storage, location_area, lost_type, proof_path, police_report_path, lost_datetime, other_details, reporter_email, police_case_number, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
-        [
-          user_id,
-          device_category,
-          device_type,
-          imei,
-          color,
-          storage,
-          location_area,
-          lost_type,
-          proof_path,
-          police_path,
-          lost_datetime,
-          other_details,
-          reporter_email,
-          police_case_number,
-        ],
-        async function (err) {
-          if (err) {
-            console.error("❌ DB Insert Error:", err.message);
-            return res.status(500).json({ error: "Failed to report device." });
-          }
-
-          const reportedAt = new Date().toLocaleString();
-
-          // ✅ Log to Google Sheets — match your columns exactly
-          await logToGoogleSheet([
-            imei,
-            device_type,              // Device Name column
-            color || "N/A",
-            storage || "N/A",
-            location_area || "N/A",
-            reporter_name || "N/A",
-            reporter_email,
-            reportedAt,
-            police_case_number || "N/A",
-          ]);
-
-          res.json({
-            success: true,
-            message: "Device reported successfully.",
-            id: this.lastID,
-          });
-        }
-      );
-    } catch (error) {
-      console.error("❌ Report-device error:", error.message);
-      res.status(500).json({ error: "Server error while reporting device." });
+// Report device
+app.post("/report-device", upload.any(), (req, res) => {
+  const { user_id, device_type, imei, reporter_email } = req.body;
+  db.run(
+    "INSERT INTO devices (user_id,device_type,imei,reporter_email) VALUES (?,?,?,?)",
+    [user_id || null, device_type || null, imei || null, reporter_email || null],
+    async function (err) {
+      if (err) return res.status(500).json({ error: "Failed" });
+      await logToSheet(["REPORT", imei, device_type, reporter_email, new Date().toLocaleString()]);
+      res.json({ success: true, id: this.lastID });
     }
-  }
-);
+  );
+});
 
-// ==============================
-// ✅ TRACK DEVICE (with live socket + Google Sheets log)
-// ==============================
+// Track device (with live push)
 app.post("/track-device", async (req, res) => {
-  try {
-    const { imei, latitude, longitude, address, trackerName } = req.body;
-    const trackedAt = new Date().toISOString().replace("T", " ").split(".")[0];
+  const { imei, latitude, longitude, address, trackerName } = req.body;
+  db.run(
+    "INSERT INTO tracking (imei,latitude,longitude,address,trackerName,trackedAt) VALUES (?,?,?,?,?,datetime('now'))",
+    [imei, latitude, longitude, address, trackerName],
+    async (err) => {
+      if (err) return res.status(500).json({ error: err.message });
+      io.emit("tracking_update", { imei, latitude, longitude, address, trackerName });
+      await logToSheet(["TRACK", imei, latitude, longitude, address, new Date().toLocaleString()]);
+      res.json({ success: true });
+    }
+  );
+});
 
+// Telemetry (API key; IMEI-change resilience via alias graph)
+app.post("/ingest/telemetry", requireTelemetryKey, async (req, res) => {
+  const { alias_map = {}, extras = {}, device_id_hint } = req.body;
+  const entries = Object.entries(alias_map).filter(([_, v]) => !!v);
+  for (const [type, value] of entries) {
     db.run(
-      `INSERT INTO tracking (imei, latitude, longitude, address, trackerName, trackedAt)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [imei, latitude, longitude, address, trackerName, trackedAt],
-      async function (err) {
-        if (err) {
-          console.error("❌ Database insert failed:", err);
-          return res.status(500).json({ error: "Database insert failed" });
-        }
-
-        // ✅ Log to Google Sheet (optional)
-        await logToGoogleSheet([
-          "TRACK",
-          imei,
-          trackerName || "Unknown",
-          latitude,
-          longitude,
-          address,
-          trackedAt,
-        ]);
-
-        // ✅ Emit live tracking update to Police/Admin dashboards
-        io.emit("tracking_update", {
-          imei,
-          latitude,
-          longitude,
-          address,
-          trackerName,
-          trackedAt,
-        });
-
-        console.log("📡 Live tracking update emitted:", imei);
-
-        res.json({
-          success: true,
-          message: "Device tracked successfully",
-        });
-      }
+      "INSERT INTO device_aliases (device_id,alias_type,alias_value) VALUES (?,?,?)",
+      [device_id_hint || null, String(type).toLowerCase(), String(value).toLowerCase()]
     );
-  } catch (err) {
-    console.error("❌ Track-device error:", err.message);
-    res.status(500).json({ error: "Failed to track device" });
   }
+  // If we know specific device_id, mark last_seen
+  if (device_id_hint) db.run(`UPDATE devices SET last_seen=CURRENT_TIMESTAMP, frozen=0 WHERE id=?`, [device_id_hint]);
+  await logToSheet(["TELEMETRY", JSON.stringify(alias_map), new Date().toLocaleString()]);
+  res.json({ success: true, received: entries.length });
 });
 
-// =====================
-// FRONTEND DEPLOY TRIGGER
-// =====================
-app.post("/trigger-frontend", async (req, res) => {
-  try {
-    const hook = process.env.VERCEL_DEPLOY_HOOK_URL;
-    if (!hook)
-      return res.status(400).json({ error: "VERCEL_DEPLOY_HOOK_URL not set" });
+// =============================================================
+// AI: Ask (RAG) + TTS
+// =============================================================
+const rss = new RSSParser();
 
-    const response = await fetch(hook, { method: "POST" });
-    if (!response.ok)
-      throw new Error(`Vercel trigger failed: ${response.statusText}`);
-
-    res.json({ success: true, message: "Frontend redeploy triggered" });
-  } catch (error) {
-    console.error("Trigger-frontend error:", error.message);
-    res.status(500).json({ error: "Failed to trigger frontend redeploy" });
-  }
-});
-
-// =====================
-// IMPORT ROUTES
-// =====================
-const adminRoutes = require("./routes/admin");
-app.use("/admin", adminRoutes);
-
-const authRoutes = require("./routes/auth");
-app.use("/auth", authRoutes);
-
-// =====================
-// DEFAULT ROUTE
-// =====================
-app.get("/", (_, res) => res.send("Welcome to PASEARCH Backend ✅"));
-
-// =====================
-// SOCKET.IO + SERVER START
-// =====================
-const server = http.createServer(app);
-const io = new Server(server, {
-  cors: {
-    origin: Array.from(ALLOWED),
-    methods: ["GET", "POST"],
-  },
-});
-
-io.on("connection", (socket) => {
-  console.log("Connected:", socket.id);
-  socket.on("disconnect", () => console.log("Disconnected:", socket.id));
-});
-
-// ======================================
-// ✅ JWT verification middleware
-// ======================================
-function verifyToken(req, res, next) {
-  const header = req.headers.authorization;
-  if (!header) return res.status(401).json({ error: "No token provided" });
-
-  const token = header.split(" ")[1];
-  try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = decoded; // { id, email, role }
-    next();
-  } catch (err) {
-    return res.status(403).json({ error: "Invalid token" });
-  }
+async function summarize(title, content) {
+  if (!openai) return (content || title || "").slice(0, 400);
+  const r = await openai.chat.completions.create({
+    model: AI_MODEL,
+    messages: [
+      {
+        role: "user",
+        content: `Summarize in 3 concise bullets (focus: cyberlaw, anti-theft, forensics, tracking):\n\n${title}\n\n${content || ""}`,
+      },
+    ],
+    temperature: 0.3,
+  });
+  return r.choices?.[0]?.message?.content?.trim() || "";
 }
 
-// ======================================
-// ✅ Import and Attach Admin Routes
-// ======================================
-app.use("/admin", verifyToken, adminRoutes);
+async function upsertIntel(item, src) {
+  const url = item.link || item.guid;
+  if (!url) return;
+  db.get("SELECT id FROM cyber_intel WHERE url=?", [url], async (err, row) => {
+    if (row) return;
+    const raw = item.contentSnippet || item.content || "";
+    const sum = await summarize(item.title || "(untitled)", raw);
+    const emb = await embedText(`${item.title || ""}\n${sum}`);
+    db.run(
+      "INSERT INTO cyber_intel (title,url,source,published_at,summary,embedding) VALUES (?,?,?,?,?,?)",
+      [item.title || "(untitled)", url, src, item.isoDate || item.pubDate || null, sum, emb ? JSON.stringify(emb) : null]
+    );
+  });
+}
 
-// ======================================
-// ✅ Start HTTP + WebSocket Server
-// ======================================
+async function refreshIntel() {
+  for (const src of INTEL_SOURCES) {
+    try {
+      const feed = await rss.parseURL(src);
+      for (const item of feed.items || []) await upsertIntel(item, feed.title || src);
+    } catch (e) {
+      console.warn("RSS fetch failed:", src, e.message);
+    }
+  }
+  await logToSheet(["INTEL_REFRESH", `${INTEL_SOURCES.length} sources`, new Date().toLocaleString()], "Intel!A1");
+}
+
+if (openai && INTEL_SOURCES.length) {
+  setInterval(() => refreshIntel().catch(() => {}), Math.max(60_000, INTEL_REFRESH_MINUTES * 60_000));
+  setTimeout(() => refreshIntel().catch(() => {}), 10_000);
+}
+
+// Manual refresh
+app.post("/intel/refresh", verifyToken, async (req, res) => {
+  try {
+    await refreshIntel();
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: "Refresh failed" });
+  }
+});
+
+// AI Q&A with RAG
+app.post("/ai/ask", async (req, res) => {
+  try {
+    if (!openai) return res.status(503).json({ error: "AI not configured" });
+    const { question } = req.body || {};
+    if (!question) return res.status(400).json({ error: "Missing question" });
+
+    const qvec = await embedText(question);
+    db.all("SELECT * FROM cyber_intel ORDER BY id DESC LIMIT 400", [], async (err, rows) => {
+      if (err || !rows || !rows.length) {
+        const fallback = await openai.chat.completions.create({
+          model: AI_MODEL,
+          messages: [
+            { role: "system", content: "You are PASEARCH AI (cybersecurity/anti-theft)." },
+            { role: "user", content: question },
+          ],
+        });
+        return res.json({ answer: fallback.choices[0].message.content.trim(), usedIntel: [] });
+      }
+      const scored = [];
+      for (const r of rows) {
+        if (!r.embedding) continue;
+        try {
+          const e = JSON.parse(r.embedding);
+          scored.push({ ...r, score: cosine(qvec, e) });
+        } catch {}
+      }
+      scored.sort((a, b) => b.score - a.score);
+      const top = scored.slice(0, 5);
+      const ctx = top.map((t, i) => `#${i + 1} ${t.title}\n${t.summary}`).join("\n\n");
+
+      const resp = await openai.chat.completions.create({
+        model: AI_MODEL,
+        messages: [
+          { role: "system", content: "You are PASEARCH AI—device recovery & cyberlaw assistant." },
+          { role: "user", content: `${question}\n\nContext:\n${ctx}` },
+        ],
+        temperature: 0.2,
+      });
+
+      res.json({
+        answer: resp.choices[0].message.content.trim(),
+        usedIntel: top.map((t) => ({ title: t.title, url: t.url, source: t.source, score: t.score })),
+      });
+    });
+  } catch (e) {
+    console.error("AI ask error:", e);
+    res.status(500).json({ error: "AI failed to respond" });
+  }
+});
+
+// Text-to-Speech
+app.post("/ai/tts", async (req, res) => {
+  try {
+    if (!openai) return res.status(503).json({ error: "AI not configured" });
+    const { text } = req.body || {};
+    if (!text) return res.status(400).json({ error: "Missing text" });
+    const speech = await openai.audio.speech.create({
+      model: "gpt-4o-mini-tts",
+      voice: "alloy",
+      input: text.slice(0, 2000),
+      format: "mp3",
+    });
+    const b64 = Buffer.from(await speech.arrayBuffer()).toString("base64");
+    res.json({ audio: `data:audio/mpeg;base64,${b64}` });
+  } catch (e) {
+    console.error("TTS error:", e);
+    res.status(500).json({ error: "TTS failed" });
+  }
+});
+
+// =============================================================
+// ADMIN NEWS FEED (Cyberlaw / theft / PASEARCH-related)
+// =============================================================
+app.get("/admin/news", async (req, res) => {
+  db.all(
+    `SELECT title,url,source,summary,published_at
+     FROM cyber_intel
+     WHERE title LIKE '%law%' OR title LIKE '%cyber%' OR title LIKE '%theft%' OR title LIKE '%pasearch%'
+     ORDER BY COALESCE(published_at, created_at) DESC
+     LIMIT 20`,
+    [],
+    (err, rows) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json({
+        updated: new Date().toISOString(),
+        articles: rows.map((r) => ({
+          title: r.title,
+          url: r.url,
+          source: r.source,
+          summary: r.summary,
+          published_at: r.published_at,
+        })),
+      });
+    }
+  );
+});
+
+// =============================================================
+// FROZEN DEVICE DETECTOR (silent >30m)
+// =============================================================
+setInterval(() => {
+  const cutoff = Date.now() - 30 * 60 * 1000;
+  const iso = new Date(cutoff).toISOString();
+  db.all(
+    "SELECT id, imei, device_type FROM devices WHERE (last_seen IS NULL OR last_seen < ?) AND frozen=0",
+    [iso],
+    (err, rows) => {
+      if (!rows || !rows.length) return;
+      for (const d of rows) {
+        db.run("UPDATE devices SET frozen=1 WHERE id=?", [d.id]);
+        io.emit("device_frozen", { id: d.id, imei: d.imei });
+        logToSheet(["FROZEN", d.imei || "N/A", d.device_type || "Unknown", new Date().toLocaleString()]);
+        if (ADMIN_EMAIL) {
+          sendEmail(
+            ADMIN_EMAIL,
+            "PASEARCH — Device Frozen",
+            `<p>Device <b>${d.device_type || "Unknown"}</b> (IMEI: ${d.imei || "N/A"}) is marked <b>FROZEN</b>.</p>`
+          );
+        }
+      }
+    }
+  );
+}, 5 * 60 * 1000);
+
+// =============================================================
+// START SERVER
+// =============================================================
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 PASEARCH backend + WebSocket running on port ${PORT}`);
+  console.log(`🚀 PASEARCH Backend + AI running on port ${PORT}`);
 });
