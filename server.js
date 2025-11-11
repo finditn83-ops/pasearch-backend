@@ -22,6 +22,29 @@ const fetch = (...args) =>
 
 require("dotenv").config();
 
+// =====================
+// ✅ MULTER FILE UPLOAD HANDLER
+// =====================
+const multer = require("multer");
+const path = require("path");
+const fs = require("fs");
+
+const UPLOAD_DIR = path.join(__dirname, "uploads");
+if (!fs.existsSync(UPLOAD_DIR)) {
+  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+  console.log("📁 Created uploads folder at:", UPLOAD_DIR);
+}
+
+const storage = multer.diskStorage({
+  destination: (_, __, cb) => cb(null, UPLOAD_DIR),
+  filename: (_, file, cb) => {
+    const safeName = Date.now() + "-" + file.originalname.replace(/\s+/g, "_");
+    cb(null, safeName);
+  },
+});
+
+const upload = multer({ storage });
+
 // ==========================
 // ✅ GOOGLE SHEETS CONNECTION CHECK
 // ==========================
@@ -211,6 +234,36 @@ db.serialize(() => {
     timestamp TEXT
   )`);
 });
+
+// =====================
+// ✅ MULTER FILE UPLOAD HANDLER (Global Export)
+// =====================
+const multer = require("multer");
+const path = require("path");
+const fs = require("fs");
+
+// Define uploads folder
+const UPLOAD_DIR = path.join(__dirname, "uploads");
+if (!fs.existsSync(UPLOAD_DIR)) {
+  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+  console.log("📁 Created uploads folder at:", UPLOAD_DIR);
+}
+
+// Configure storage engine
+const storage = multer.diskStorage({
+  destination: (_, __, cb) => cb(null, UPLOAD_DIR),
+  filename: (_, file, cb) => {
+    // Replace spaces with underscores to avoid path issues
+    const safeName = Date.now() + "-" + file.originalname.replace(/\s+/g, "_");
+    cb(null, safeName);
+  },
+});
+
+// Initialize multer
+const upload = multer({ storage });
+
+// ✅ Export it for other route files to use
+module.exports.upload = upload;
 
 // =====================
 // ROUTES
