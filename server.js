@@ -226,15 +226,26 @@ const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*"} });
 
 // =============================================================
-// CORE ROUTES
+// 🧠 CORE ROUTES — PASEARCH Backend Identity
 // =============================================================
-app.get("/", (_, res) =>
+app.get("/", (_, res) => {
   res.json({
-    service: "PASEARCH Backend",
-    ai: !!openai,
-    mission: "Locate, track & recover devices (IMEI-change resilient)",
-  })
-);
+    service: "PASEARCH Backend API ✅",
+    status: "online",
+    version: "2.0",
+    mission: "Locate, track and recover devices — even if IMEI is changed.",
+    description:
+      "PASEARCH integrates AI, cyber-intel crawling, Google Sheets logging and real-time WebSocket tracking to help users and authorities recover stolen or lost devices.",
+    components: {
+      database: "SQLite (devices, tracking, users)",
+      ai_assistant: "PASEARCH AI with OpenAI + NewsAPI",
+      live_tracking: "Socket.IO real-time updates",
+      sheets_logging: "Google Sheets API logging",
+    },
+    ai_ready: typeof openai !== "undefined",
+    time: new Date().toISOString(),
+  });
+});
 
 // Auth: register/login
 app.post("/auth/register", async (req, res) => {
@@ -496,6 +507,99 @@ setInterval(() => {
     }
   );
 }, 5 * 60 * 1000);
+
+// ======================================================
+// 🤖 PASEARCH AI — Enhanced /ai/ask route
+// ======================================================
+import fetch from "node-fetch"; // if you're using ES modules; otherwise use require() below
+
+// If your server.js uses require() syntax (most do), then use this instead:
+const fetch = (...args) => import("node-fetch").then(({ default: fetch }) => fetch(...args));
+
+app.post("/ai/ask", async (req, res) => {
+  const { query } = req.body;
+  if (!query) return res.status(400).json({ answer: "No question provided." });
+
+  try {
+    let answer = "";
+
+    // 1️⃣ IMEI lookup in database
+    const imeiMatch = query.match(/\b\d{10,17}\b/);
+    if (imeiMatch) {
+      const imei = imeiMatch[0];
+      answer += `🔎 Checking device IMEI ${imei} in database...\n\n`;
+
+      const row = await new Promise((resolve, reject) => {
+        db.get("SELECT * FROM devices WHERE imei = ?", [imei], (err, r) =>
+          err ? reject(err) : resolve(r)
+        );
+      });
+
+      if (row) {
+        answer += `✅ Device found: ${row.device_type || "Unknown"} (${row.color || "No color"})\n`;
+        answer += `Status: ${row.status}\nReported Area: ${row.location_area || "N/A"}\n\n`;
+      } else {
+        answer += "❌ This IMEI isn’t yet registered in the PASEARCH system.\n\n";
+      }
+    }
+
+    // 2️⃣ Cyber-Intel lookup (latest news)
+    const newsURL =
+      "https://newsapi.org/v2/everything?q=cybercrime+OR+hacking+law&language=en&sortBy=publishedAt&pageSize=3&apiKey=" +
+      process.env.NEWS_API_KEY;
+
+    let intelText = "";
+    try {
+      const newsRes = await fetch(newsURL);
+      const newsData = await newsRes.json();
+      if (newsData?.articles?.length) {
+        intelText =
+          "📰 Latest Cyber-Intel:\n" +
+          newsData.articles
+            .map((a) => `• ${a.title} — ${a.source.name}`)
+            .join("\n") +
+          "\n\n";
+      }
+    } catch (e) {
+      intelText = "⚠️ Could not load cyber-intel feed right now.\n\n";
+    }
+    answer += intelText;
+
+    // 3️⃣ Personalized recovery advice
+    if (/lost|stolen|recover|track/i.test(query)) {
+      answer +=
+        "🧭 Recovery Advice:\n" +
+        "- Ensure your device is reported in PASEARCH and marked 'Under Investigation'.\n" +
+        "- Keep your IMEI ready and only share it with verified police/telecom partners.\n" +
+        "- Check your dashboard for GPS or tracking updates.\n" +
+        "- File or follow up your police report as needed.\n\n";
+    }
+
+    // 4️⃣ Optional OpenAI summary
+    try {
+      const OpenAI = (await import("openai")).default;
+      const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: "You are PASEARCH AI, a cybersecurity recovery assistant." },
+          { role: "user", content: answer + "\n\nUser question: " + query },
+        ],
+        max_tokens: 300,
+      });
+      answer = completion.choices[0].message.content;
+    } catch (err) {
+      console.log("OpenAI summarizer skipped:", err.message);
+    }
+
+    res.json({ answer });
+  } catch (err) {
+    console.error("AI route error:", err);
+    res.status(500).json({
+      answer: "⚠️ Internal error while processing your request. Please try again later.",
+    });
+  }
+});
 
 // =============================================================
 // START SERVER
