@@ -15,7 +15,7 @@ const fs = require("fs");
 const http = require("http");
 const { Server } = require("socket.io");
 const { google } = require("googleapis");
-const fetch = (...args) => import("node-fetch").then(({ default: f }) => f(...args));
+// ✅ Using native fetch (Node 18+)
 const OpenAI = require("openai");
 const RSSParser = require("rss-parser");
 require("dotenv").config();
