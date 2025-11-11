@@ -1,21 +1,19 @@
 // =============================================================
-// 🧑‍💻 routes/auth.js — Authentication + OTP + Google Sheet Logging + Admin Alerts + Live Feed
+// 🔐 routes/auth.js — Secure Authentication + OTP + Sheet Logging + Alerts
 // =============================================================
 const express = require("express");
 const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
 const nodemailer = require("nodemailer");
 const sqlite3 = require("sqlite3").verbose();
-const { google } = require("googleapis");
+const { logSecurityEvent } = require("../sheetsHelper");
 require("dotenv").config();
-
-// ✅ Access global Socket.IO instance (exported from server.js)
-const { io } = require("../socket") || { io: null };
 
 const router = express.Router();
 const db = new sqlite3.Database("devices.db");
 
 // =============================================================
-// ✉️ Nodemailer Transport
+// ✉️ EMAIL TRANSPORT — Gmail SMTP
 // =============================================================
 const transporter = nodemailer.createTransport({
   service: "gmail",
@@ -26,91 +24,96 @@ const transporter = nodemailer.createTransport({
 });
 
 // =============================================================
-// 📊 Google Sheets Logging Helper
+// 🧠 In-memory OTP Tracker (auto resets every 10 min)
 // =============================================================
-async function logPasswordResetEvent(action, email, status, details = "") {
+const otpCache = {};
+const otpFailCount = {};
+
+// =============================================================
+// 🧩 1️⃣ USER REGISTRATION
+// =============================================================
+router.post("/register", async (req, res) => {
   try {
-    if (!process.env.GOOGLE_SERVICE_ACCOUNT_JSON || !process.env.GOOGLE_SHEET_ID) {
-      console.warn("⚠️ Skipping Google Sheet log: missing credentials or sheet ID");
-      return;
+    const { username, email, phone, password, role } = req.body;
+    if (!username || !email || !phone || !password)
+      return res.status(400).json({ error: "Missing required fields" });
+
+    const userRole =
+      email === process.env.ADMIN_EMAIL ? "admin" : role || "reporter";
+
+    const hashed = await bcrypt.hash(password, 10);
+
+    db.run(
+      "INSERT INTO users (username, email, phone, password, role, verified, created_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))",
+      [username, email, phone, hashed, userRole, 1],
+      async function (err) {
+        if (err) {
+          console.error("❌ Registration error:", err.message);
+          return res
+            .status(409)
+            .json({ error: "Username, email, or phone already exists." });
+        }
+
+        const token = jwt.sign(
+          { id: this.lastID, username, email, role: userRole },
+          process.env.JWT_SECRET,
+          { expiresIn: "7d" }
+        );
+
+        await logSecurityEvent(email, "REGISTER", "SUCCESS", `Role: ${userRole}`);
+        res.json({
+          success: true,
+          message: "Account created successfully.",
+          token,
+        });
+      }
+    );
+  } catch (err) {
+    console.error("Register error:", err);
+    res.status(500).json({ error: "Server error during registration" });
+  }
+});
+
+// =============================================================
+// 🧩 2️⃣ USER LOGIN
+// =============================================================
+router.post("/login", async (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password)
+    return res.status(400).json({ error: "Username and password required" });
+
+  db.get("SELECT * FROM users WHERE username = ?", [username], async (err, user) => {
+    if (err) return res.status(500).json({ error: "Database error" });
+    if (!user)
+      return res.status(400).json({ error: "Invalid username or password" });
+
+    const valid = await bcrypt.compare(password, user.password);
+    if (!valid) {
+      await logSecurityEvent(user.email, "LOGIN", "FAILED", "Incorrect password");
+      return res.status(400).json({ error: "Invalid username or password" });
     }
 
-    const serviceAccount = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
-    const auth = new google.auth.GoogleAuth({
-      credentials: serviceAccount,
-      scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+    const token = jwt.sign(
+      { id: user.id, username: user.username, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: "7d" }
+    );
+
+    await logSecurityEvent(user.email, "LOGIN", "SUCCESS", `Role: ${user.role}`);
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        role: user.role,
+      },
     });
-
-    const sheets = google.sheets({ version: "v4", auth });
-    const timestamp = new Date().toLocaleString();
-    const values = [[action, email, status, details, timestamp]];
-
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: process.env.GOOGLE_SHEET_ID,
-      range: "PasswordResets!A1",
-      valueInputOption: "USER_ENTERED",
-      requestBody: { values },
-    });
-
-    console.log(`✅ Logged ${action} for ${email} (${status})`);
-  } catch (err) {
-    console.error("❌ Failed to log password reset event:", err.message);
-  }
-}
+  });
+});
 
 // =============================================================
-// 🧠 Local memory tracker for failed OTP attempts
-// =============================================================
-const otpFailures = {}; // { email: [timestamps] }
-
-function recordOtpFailure(email) {
-  const now = Date.now();
-  if (!otpFailures[email]) otpFailures[email] = [];
-  otpFailures[email].push(now);
-
-  // Keep only failures within last 5 minutes
-  otpFailures[email] = otpFailures[email].filter((t) => now - t < 5 * 60 * 1000);
-
-  return otpFailures[email].length;
-}
-
-// =============================================================
-// 🚨 Admin Alert Email + Socket.IO Broadcast
-// =============================================================
-async function sendAdminAlert(email, failCount) {
-  try {
-    await transporter.sendMail({
-      from: `"PASEARCH Security" <${process.env.ADMIN_EMAIL}>`,
-      to: process.env.ADMIN_EMAIL,
-      subject: "🚨 ALERT: Multiple OTP Failures Detected",
-      html: `
-        <h3>Suspicious Activity Detected</h3>
-        <p>User <b>${email}</b> failed OTP verification <b>${failCount}</b> times within 5 minutes.</p>
-        <p>This could indicate a brute-force or phishing attempt.</p>
-        <p><b>Time:</b> ${new Date().toLocaleString()}</p>
-        <hr />
-        <p><i>Automated alert from PASEARCH Cyber-Intel System</i></p>
-      `,
-    });
-
-    console.log(`🚨 Admin alert sent for ${email} (${failCount} failed attempts)`);
-
-    // 🟢 Emit live alert to all connected admin dashboards
-    if (io) {
-      io.emit("security_alert", {
-        type: "OTP_FAILURE",
-        email,
-        failCount,
-        time: new Date().toLocaleString(),
-      });
-    }
-  } catch (err) {
-    console.error("❌ Failed to send admin alert:", err.message);
-  }
-}
-
-// =============================================================
-// 🧩 1️⃣ Forgot Password — Send OTP
+// 🧩 3️⃣ FORGOT PASSWORD — Send OTP
 // =============================================================
 router.post("/forgot-password", async (req, res) => {
   const { email } = req.body;
@@ -118,21 +121,13 @@ router.post("/forgot-password", async (req, res) => {
 
   db.get("SELECT * FROM users WHERE email = ?", [email], async (err, user) => {
     if (err) return res.status(500).json({ error: "Database error" });
-    if (!user) {
-      await logPasswordResetEvent("Forgot Password", email, "FAILED", "User not found");
-      return res.status(404).json({ error: "No user found with that email." });
-    }
+    if (!user)
+      return res.status(404).json({ error: "No user found with that email" });
 
-    const otp = Math.floor(100000 + Math.random() * 900000);
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
     const expiresAt = Date.now() + 10 * 60 * 1000;
 
-    db.run("CREATE TABLE IF NOT EXISTS otps (email TEXT, otp TEXT, expires_at INTEGER)");
-    db.run("DELETE FROM otps WHERE email = ?", [email]);
-    db.run("INSERT INTO otps (email, otp, expires_at) VALUES (?, ?, ?)", [
-      email,
-      otp.toString(),
-      expiresAt,
-    ]);
+    otpCache[email] = { otp, expiresAt };
 
     try {
       await transporter.sendMail({
@@ -147,72 +142,71 @@ router.post("/forgot-password", async (req, res) => {
         `,
       });
 
-      await logPasswordResetEvent("Forgot Password", email, "SUCCESS", `OTP ${otp} sent`);
+      await logSecurityEvent(email, "FORGOT PASSWORD", "SUCCESS", `OTP: ${otp}`);
       res.json({ message: "OTP sent successfully to your email." });
-    } catch (mailErr) {
-      await logPasswordResetEvent("Forgot Password", email, "FAILED", mailErr.message);
-      res.status(500).json({ error: "Failed to send OTP email." });
+    } catch (err) {
+      await logSecurityEvent(email, "FORGOT PASSWORD", "FAILED", err.message);
+      res.status(500).json({ error: "Failed to send OTP" });
     }
   });
 });
 
 // =============================================================
-// 🧩 2️⃣ Verify OTP — with live alert broadcast
+// 🧩 4️⃣ VERIFY OTP
 // =============================================================
 router.post("/verify-otp", async (req, res) => {
   const { email, otp } = req.body;
   if (!email || !otp)
     return res.status(400).json({ error: "Email and OTP are required" });
 
-  db.get(
-    "SELECT * FROM otps WHERE email = ? AND otp = ?",
-    [email, otp.toString()],
-    async (err, row) => {
-      if (err) return res.status(500).json({ error: "Database error" });
-      if (!row) {
-        const failCount = recordOtpFailure(email);
-        await logPasswordResetEvent("Verify OTP", email, "FAILED", `Invalid OTP (${failCount}x)`);
+  const record = otpCache[email];
+  if (!record)
+    return res.status(400).json({ error: "No OTP request found for this email" });
 
-        // 🚨 Trigger admin alert for 3+ failures
-        if (failCount >= 3) await sendAdminAlert(email, failCount);
+  if (Date.now() > record.expiresAt)
+    return res.status(400).json({ error: "OTP expired" });
 
-        return res.status(400).json({ error: "Invalid OTP" });
-      }
+  if (record.otp !== otp) {
+    otpFailCount[email] = (otpFailCount[email] || 0) + 1;
+    await logSecurityEvent(email, "VERIFY OTP", "FAILED", `Attempt ${otpFailCount[email]}`);
 
-      if (Date.now() > row.expires_at) {
-        await logPasswordResetEvent("Verify OTP", email, "FAILED", "OTP expired");
-        return res.status(400).json({ error: "OTP expired" });
-      }
-
-      await logPasswordResetEvent("Verify OTP", email, "SUCCESS");
-      res.json({ message: "OTP verified successfully" });
+    // ⚠️ Send admin alert if 3+ failures
+    if (otpFailCount[email] >= 3) {
+      try {
+        await transporter.sendMail({
+          from: `"PASEARCH Security" <${process.env.ADMIN_EMAIL}>`,
+          to: process.env.ADMIN_EMAIL,
+          subject: `🚨 ALERT: Multiple OTP failures for ${email}`,
+          html: `<p>${email} has failed OTP verification ${otpFailCount[email]} times.</p>`,
+        });
+      } catch {}
     }
-  );
+    return res.status(400).json({ error: "Invalid OTP" });
+  }
+
+  await logSecurityEvent(email, "VERIFY OTP", "SUCCESS");
+  delete otpCache[email];
+  res.json({ message: "OTP verified successfully" });
 });
 
 // =============================================================
-// 🧩 3️⃣ Reset Password
+// 🧩 5️⃣ RESET PASSWORD
 // =============================================================
 router.post("/reset-password", async (req, res) => {
   const { email, newPassword } = req.body;
   if (!email || !newPassword)
-    return res.status(400).json({ error: "Email and new password are required" });
+    return res.status(400).json({ error: "Email and new password required" });
 
   const hashed = await bcrypt.hash(newPassword, 10);
-
-  db.run(
-    "UPDATE users SET password = ? WHERE email = ?",
-    [hashed, email],
-    async (err) => {
-      if (err) {
-        await logPasswordResetEvent("Reset Password", email, "FAILED", err.message);
-        return res.status(500).json({ error: "Database update failed" });
-      }
-
-      await logPasswordResetEvent("Reset Password", email, "SUCCESS");
-      res.json({ message: "Password reset successfully! You can now log in." });
+  db.run("UPDATE users SET password = ? WHERE email = ?", [hashed, email], async (err) => {
+    if (err) {
+      await logSecurityEvent(email, "RESET PASSWORD", "FAILED", err.message);
+      return res.status(500).json({ error: "Failed to reset password" });
     }
-  );
+
+    await logSecurityEvent(email, "RESET PASSWORD", "SUCCESS");
+    res.json({ message: "Password reset successfully. You can now log in." });
+  });
 });
 
 module.exports = router;
