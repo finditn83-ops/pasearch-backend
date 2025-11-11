@@ -19,177 +19,95 @@ const { Server } = require("socket.io");
 const { google } = require("googleapis");
 const fetch = (...args) =>
   import("node-fetch").then(({ default: fetch }) => fetch(...args));
+
 require("dotenv").config();
+
 // ==========================
 // ✅ GOOGLE SHEETS CONNECTION CHECK
 // ==========================
-if (process.env.GOOGLE_SHEET_ID && process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
+if (
+  process.env.GOOGLE_SHEET_ID &&
+  (process.env.GOOGLE_SERVICE_ACCOUNT_PATH || process.env.GOOGLE_SERVICE_ACCOUNT_JSON)
+) {
   console.log(`✅ Google Sheets logging enabled (Sheet ID: ${process.env.GOOGLE_SHEET_ID})`);
 } else {
-  console.warn("⚠️ Google Sheets disabled: Missing GOOGLE_SHEET_ID or GOOGLE_SERVICE_ACCOUNT_JSON in .env");
+  console.warn("⚠️ Google Sheets disabled: Missing credentials or sheet ID");
 }
-
-// ✅ Import admin routes
-const adminRoutes = require("./routes/admin");
 
 // ==========================
-// ✅ GOOGLE SHEETS LOGGING HELPER
+// ✅ GOOGLE SHEETS UNIVERSAL AUTH
 // ==========================
-async function logToGoogleSheet(dataRow) {
+async function getGoogleAuth() {
   try {
-    if (!process.env.GOOGLE_SERVICE_ACCOUNT_JSON || !process.env.GOOGLE_SHEET_ID) {
-      console.warn("⚠️ Skipping Google Sheet log: Missing credentials or sheet ID");
-      return;
+    if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
+      const creds = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+      return new google.auth.GoogleAuth({
+        credentials: creds,
+        scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+      });
     }
 
-    const serviceAccount = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
-    const auth = new google.auth.GoogleAuth({
-      credentials: serviceAccount,
+    const keyFile = process.env.GOOGLE_SERVICE_ACCOUNT_PATH || "./service-account.json";
+    if (!fs.existsSync(keyFile))
+      throw new Error(`Missing Google key file at: ${keyFile}`);
+
+    return new google.auth.GoogleAuth({
+      keyFile,
       scopes: ["https://www.googleapis.com/auth/spreadsheets"],
     });
-
-    const sheets = google.sheets({ version: "v4", auth });
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: process.env.GOOGLE_SHEET_ID,
-      range: "Sheet1!A1",
-      valueInputOption: "USER_ENTERED",
-      requestBody: { values: [dataRow] },
-    });
-
-    console.log("✅ Logged to Google Sheet:", dataRow);
   } catch (err) {
-    console.error("❌ Google Sheets log failed:", err.message);
+    console.error("❌ Google Auth Error:", err.message);
+    throw err;
   }
 }
 
-// ======================================
-// ✅ Log Login Activity to Google Sheets
-// ======================================
-async function logLoginActivityToSheet({
-  username,
-  role,
-  city,
-  country,
-  ip,
-  localTime,
-  utcTime,
-}) {
+// ==========================
+// ✅ GENERIC SHEET APPENDER
+// ==========================
+async function appendToSheet(tabName, dataRow) {
   try {
-    const auth = new google.auth.GoogleAuth({
-      keyFile: process.env.GOOGLE_SERVICE_ACCOUNT_PATH,
-      scopes: ["https://www.googleapis.com/auth/spreadsheets"],
-    });
+    const auth = await getGoogleAuth();
     const sheets = google.sheets({ version: "v4", auth });
-
-    const now = new Date().toLocaleString();
-    const values = [
-      [username, role, city, country, ip, localTime, utcTime, now],
-    ];
+    const timestamp = new Date().toLocaleString();
+    const row = [...dataRow, timestamp];
 
     await sheets.spreadsheets.values.append({
       spreadsheetId: process.env.GOOGLE_SHEET_ID,
-      range: "LoginActivity!A1",
+      range: `${tabName}!A1`,
       valueInputOption: "USER_ENTERED",
-      requestBody: { values },
+      requestBody: { values: [row] },
     });
 
-    console.log(`✅ Logged login activity for ${username} (${role})`);
+    console.log(`✅ Logged to ${tabName}:`, row);
   } catch (err) {
-    console.error("❌ Failed to log login activity:", err.message);
+    console.error(`❌ Failed to log to ${tabName}:`, err.message);
   }
 }
 
-// ======================================
-// 🚫 Log Failed Login Attempts to Google Sheets
-// ======================================
-async function logFailedLoginAttempt({ username, ip, city, country, reason }) {
-  try {
-    const auth = new google.auth.GoogleAuth({
-      keyFile: process.env.GOOGLE_SERVICE_ACCOUNT_PATH,
-      scopes: ["https://www.googleapis.com/auth/spreadsheets"],
-    });
-    const sheets = google.sheets({ version: "v4", auth });
-
-    const time = new Date().toLocaleString();
-    const values = [[username, ip, city, country, time, reason]];
-
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: process.env.GOOGLE_SHEET_ID,
-      range: "LoginAttempts!A1",
-      valueInputOption: "USER_ENTERED",
-      requestBody: { values },
-    });
-
-    console.log(`🚫 Logged failed login attempt for ${username}`);
-  } catch (err) {
-    console.error("❌ Failed to log failed attempt:", err.message);
-  }
-}
-
-
-// ==============================
-// ✅ GOOGLE SHEETS HELPER FOR ADMIN UPDATES
-// ==============================
-async function logToGoogleSheetInAdminTab(dataRow) {
-  try {
-    if (!process.env.GOOGLE_SERVICE_ACCOUNT_JSON || !process.env.GOOGLE_SHEET_ID) {
-      console.warn("⚠️ Skipping admin log: Missing Google credentials");
-      return;
-    }
-
-    const serviceAccount = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
-    const auth = new google.auth.GoogleAuth({
-      credentials: serviceAccount,
-      scopes: ["https://www.googleapis.com/auth/spreadsheets"],
-    });
-
-    const sheets = google.sheets({ version: "v4", auth });
-
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: process.env.GOOGLE_SHEET_ID,
-      range: "AdminUpdates!A1", // Logs into second tab
-      valueInputOption: "USER_ENTERED",
-      requestBody: { values: [dataRow] },
-    });
-  } catch (err) {
-    console.error("⚠️ Admin Sheet log error:", err.message);
-  }
-}
-
-// ==============================
-// ✅ GOOGLE SHEETS HELPER FOR POLICE UPDATES (logs to 'PoliceUpdates' tab)
-// ==============================
-async function logToGoogleSheetInPoliceTab(dataRow) {
-  try {
-    // Check credentials
-    if (!process.env.GOOGLE_SERVICE_ACCOUNT_JSON || !process.env.GOOGLE_SHEET_ID) {
-      console.warn("⚠️ Skipping police log: Missing Google credentials");
-      return;
-    }
-
-    // Parse credentials from .env
-    const serviceAccount = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
-    const auth = new google.auth.GoogleAuth({
-      credentials: serviceAccount,
-      scopes: ["https://www.googleapis.com/auth/spreadsheets"],
-    });
-
-    // Initialize Google Sheets API
-    const sheets = google.sheets({ version: "v4", auth });
-
-    // Append new row to PoliceUpdates tab
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: process.env.GOOGLE_SHEET_ID,
-      range: "PoliceUpdates!A1", // 👈 this is your tab name
-      valueInputOption: "USER_ENTERED",
-      requestBody: { values: [dataRow] },
-    });
-
-    console.log("✅ Logged to PoliceUpdates sheet:", dataRow);
-  } catch (err) {
-    console.error("⚠️ Police Sheet log error:", err.message);
-  }
-}
+// ==========================
+// ✅ SPECIFIC LOGGING HELPERS
+// ==========================
+const logToGoogleSheet = (dataRow) => appendToSheet("Sheet1", dataRow);
+const logLoginActivityToSheet = (info) =>
+  appendToSheet("LoginActivity", [
+    info.username,
+    info.role,
+    info.city,
+    info.country,
+    info.ip,
+    info.localTime,
+    info.utcTime,
+  ]);
+const logFailedLoginAttempt = (info) =>
+  appendToSheet("LoginAttempts", [
+    info.username,
+    info.ip,
+    info.city,
+    info.country,
+    info.reason,
+  ]);
+const logToGoogleSheetInAdminTab = (dataRow) => appendToSheet("AdminUpdates", dataRow);
+const logToGoogleSheetInPoliceTab = (dataRow) => appendToSheet("PoliceUpdates", dataRow);
 
 // =====================
 // EXPRESS + CORS
@@ -198,7 +116,6 @@ const app = express();
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-// ✅ Safe CORS origin list
 const extraOriginsEnv = process.env.CORS_EXTRA_ORIGINS || "";
 const extraOrigins = extraOriginsEnv
   ? extraOriginsEnv.split(",").map((s) => s.trim()).filter(Boolean)
@@ -210,7 +127,6 @@ const allowedOrigins = [
   "https://pasearch-frontend.vercel.app",
   ...extraOrigins,
 ];
-
 const ALLOWED = new Set(allowedOrigins);
 
 app.use(
@@ -295,89 +211,6 @@ db.serialize(() => {
     timestamp TEXT
   )`);
 });
-
-// =====================
-// ✅ GOOGLE SHEETS HELPER (supports .env JSON or local file)
-// =====================
-async function logToGoogleSheet(dataRow) {
-  try {
-    let auth;
-
-    // 1️⃣ Prefer inline JSON from .env
-    if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
-      const serviceAccount = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
-      auth = new google.auth.GoogleAuth({
-        credentials: serviceAccount,
-        scopes: ["https://www.googleapis.com/auth/spreadsheets"],
-      });
-    }
-    // 2️⃣ Fallback: use local key file for local testing
-    else {
-      const keyFile =
-        process.env.GOOGLE_SERVICE_ACCOUNT_PATH || "./service-account.json";
-      if (!fs.existsSync(keyFile))
-        throw new Error(`Missing service account file: ${keyFile}`);
-
-      auth = new google.auth.GoogleAuth({
-        keyFile,
-        scopes: ["https://www.googleapis.com/auth/spreadsheets"],
-      });
-    }
-
-    // 3️⃣ Prepare Sheets API
-    const sheets = google.sheets({ version: "v4", auth });
-
-    // 4️⃣ Add timestamp automatically
-    const timestamp = new Date().toISOString().replace("T", " ").split(".")[0];
-    const fullRow = [...dataRow, timestamp];
-
-    // 5️⃣ Append to sheet
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: process.env.GOOGLE_SHEET_ID,
-      range: "Sheet1!A1",
-      valueInputOption: "USER_ENTERED",
-      requestBody: { values: [fullRow] },
-    });
-
-    console.log("✅ Logged to Google Sheets:", fullRow);
-  } catch (err) {
-    console.error("⚠️ Sheets log error:", err.message);
-  }
-}
-
-// =====================
-// MULTER FILE UPLOADS
-// =====================
-const storage = multer.diskStorage({
-  destination: (_, __, cb) => cb(null, UPLOAD_DIR),
-  filename: (_, file, cb) =>
-    cb(null, Date.now() + "-" + file.originalname.replace(/\s+/g, "_")),
-});
-const upload = multer({ storage });
-
-// =====================
-// AUTH MIDDLEWARE
-// =====================
-function auth(req, res, next) {
-  const hdr = req.headers.authorization || "";
-  const token = hdr.startsWith("Bearer ") ? hdr.slice(7) : null;
-  if (!token) return res.status(401).json({ error: "No token provided" });
-  jwt.verify(token, JWT_SECRET, (err, decoded) => {
-    if (err && err.name === "TokenExpiredError")
-      return res.status(401).json({ error: "Token expired" });
-    if (err) return res.status(401).json({ error: "Invalid token" });
-    req.user = decoded;
-    next();
-  });
-}
-
-const requireRole =
-  (...roles) =>
-  (req, res, next) => {
-    if (!req.user || !roles.includes(req.user.role))
-      return res.status(403).json({ error: "Forbidden" });
-    next();
-  };
 
 // =====================
 // ROUTES

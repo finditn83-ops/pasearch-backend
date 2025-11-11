@@ -4,8 +4,7 @@ const sqlite3 = require("sqlite3").verbose();
 const db = new sqlite3.Database("devices.db");
 
 // ✅ IMPORT GOOGLE SHEET HELPERS
-const { logToGoogleSheetInAdminTab, logToGoogleSheetInPoliceTab } = require("../sheetsHelper"); 
-// (👉 make sure this helper exists — see note below)
+const { logToGoogleSheetInAdminTab, logToGoogleSheetInPoliceTab } = require("../sheetsHelper");
 
 // ✅ Middleware to verify admin access
 function requireAdmin(req, res, next) {
