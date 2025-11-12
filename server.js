@@ -15,10 +15,41 @@ const fs = require("fs");
 const http = require("http");
 const { Server } = require("socket.io");
 const { google } = require("googleapis");
+
+// =============================================================
 // ✅ Using native fetch (Node 18+)
+// =============================================================
+
+// 🚀 Trigger Vercel frontend redeploy
+app.post("/trigger-frontend", async (req, res) => {
+  try {
+    const hook = process.env.VERCEL_DEPLOY_HOOK_URL;
+    if (!hook) {
+      return res.status(400).json({ error: "VERCEL_DEPLOY_HOOK_URL not set" });
+    }
+
+    // ✅ Native fetch (no import required in Node 18+)
+    const response = await fetch(hook, { method: "POST" });
+    if (!response.ok) {
+      throw new Error(`Vercel trigger failed: ${response.statusText}`);
+    }
+
+    res.json({ success: true, message: "Frontend redeploy triggered" });
+  } catch (error) {
+    console.error("Trigger-frontend error:", error.message);
+    res.status(500).json({ error: "Failed to trigger frontend redeploy" });
+  }
+});
+
+// =============================================================
+// 🤖 PASEARCH AI + CYBER INTEL SECTION
+// =============================================================
 const OpenAI = require("openai");
 const RSSParser = require("rss-parser");
 require("dotenv").config();
+
+// Initialize AI + RSS helpers here...
+// (if not already defined earlier)
 
 // =============================================================
 // ⚙️ CONFIG
