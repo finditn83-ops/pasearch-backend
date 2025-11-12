@@ -1,8 +1,9 @@
 // =============================================================
 // 🚀 PASEARCH BACKEND — Locate, Track & Recover Devices
-// + PASEARCH AI (RAG + Voice) + Cyber Intel Crawler + Admin News Feed
+// + PASEARCH AI (RAG + TTS) + Cyber Intel Crawler + Admin News Feed
 // =============================================================
 
+/* ------------------------ 1) IMPORTS & CONFIG ------------------------ */
 const express = require("express");
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
@@ -15,54 +16,23 @@ const fs = require("fs");
 const http = require("http");
 const { Server } = require("socket.io");
 const { google } = require("googleapis");
-
-// =============================================================
-// ✅ Using native fetch (Node 18+)
-// =============================================================
-
-// 🚀 Trigger Vercel frontend redeploy
-app.post("/trigger-frontend", async (req, res) => {
-  try {
-    const hook = process.env.VERCEL_DEPLOY_HOOK_URL;
-    if (!hook) {
-      return res.status(400).json({ error: "VERCEL_DEPLOY_HOOK_URL not set" });
-    }
-
-    // ✅ Native fetch (no import required in Node 18+)
-    const response = await fetch(hook, { method: "POST" });
-    if (!response.ok) {
-      throw new Error(`Vercel trigger failed: ${response.statusText}`);
-    }
-
-    res.json({ success: true, message: "Frontend redeploy triggered" });
-  } catch (error) {
-    console.error("Trigger-frontend error:", error.message);
-    res.status(500).json({ error: "Failed to trigger frontend redeploy" });
-  }
-});
-
-// =============================================================
-// 🤖 PASEARCH AI + CYBER INTEL SECTION
-// =============================================================
-const OpenAI = require("openai");
 const RSSParser = require("rss-parser");
+const OpenAI = require("openai");
 require("dotenv").config();
 
-// Initialize AI + RSS helpers here...
-// (if not already defined earlier)
-
-// =============================================================
-// ⚙️ CONFIG
-// =============================================================
+/* ------------------------ 2) ENV / CONSTANTS ------------------------ */
 const PORT = process.env.PORT || 5000;
 const DB_PATH = path.join(__dirname, "devices.db");
 const UPLOAD_DIR = path.join(__dirname, "uploads");
 const JWT_SECRET = process.env.JWT_SECRET || "dev_secret";
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "admin@example.com";
+
 const TELEMETRY_API_KEY = process.env.TELEMETRY_API_KEY || "telemetry_key";
+
 const OPENAI_KEY = process.env.OPENAI_API_KEY || "";
 const AI_MODEL = process.env.AI_MODEL || "gpt-4o-mini";
 const EMBED_MODEL = process.env.EMBED_MODEL || "text-embedding-3-small";
+
 const INTEL_REFRESH_MINUTES = Number(process.env.INTEL_REFRESH_MINUTES || 180);
 const INTEL_SOURCES = (process.env.INTEL_SOURCES ||
   [
@@ -75,27 +45,44 @@ const INTEL_SOURCES = (process.env.INTEL_SOURCES ||
   .map((s) => s.trim())
   .filter(Boolean);
 
-// =============================================================
-// APP INIT
-// =============================================================
+/* ------------------------ 3) APP INIT & CORS ------------------------ */
 const app = express();
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-// =============================================================
-// 🌐 CORS CONFIGURATION — Local + Render + Vercel
-// =============================================================
 const allowedOrigins = [
   "http://localhost:5173",
   "http://localhost:3000",
-  "https://pasearch-frontend.vercel.app", // ✅ your live frontend
+  "https://pasearch-frontend.vercel.app",
 ];
+if (process.env.CORS_EXTRA_ORIGINS) {
+  allowedOrigins.push(
+    ...process.env.CORS_EXTRA_ORIGINS.split(",").map((s) => s.trim())
+  );
+}
+const ALLOWED = new Set(allowedOrigins);
 
-// =============================================================
-// ✅ CORE ROUTES — HEALTH, DEPLOY TRIGGER, AND SUBROUTES
-// =============================================================
+app.use(
+  cors({
+    origin: (origin, cb) => {
+      if (!origin) return cb(null, true);
+      try {
+        const hostname = new URL(origin).hostname;
+        const ok =
+          ALLOWED.has(origin) ||
+          /\.vercel\.app$/.test(hostname) ||
+          hostname.endsWith(".onrender.com");
+        return cb(ok ? null : new Error("CORS blocked"), ok);
+      } catch {
+        return cb(new Error("Invalid origin"));
+      }
+    },
+    credentials: true,
+  })
+);
 
-// ✅ Health check route
+/* ------------------------ 4) HEALTH & UTIL ROUTES ------------------------ */
+// Health
 app.get("/", (_, res) =>
   res.json({
     ok: true,
@@ -105,16 +92,14 @@ app.get("/", (_, res) =>
   })
 );
 
-// ✅ Frontend redeploy trigger (using native fetch, Node 18+)
+// Frontend redeploy trigger (Vercel) — uses native global fetch (Node 18+)
 app.post("/trigger-frontend", async (req, res) => {
   try {
     const hook = process.env.VERCEL_DEPLOY_HOOK_URL;
-    if (!hook)
-      return res.status(400).json({ error: "VERCEL_DEPLOY_HOOK_URL not set" });
+    if (!hook) return res.status(400).json({ error: "VERCEL_DEPLOY_HOOK_URL not set" });
 
     const response = await fetch(hook, { method: "POST" });
-    if (!response.ok)
-      throw new Error(`Vercel trigger failed: ${response.statusText}`);
+    if (!response.ok) throw new Error(`Vercel trigger failed: ${response.statusText}`);
 
     console.log("✅ Frontend redeploy triggered");
     res.json({ success: true, message: "Frontend redeploy triggered" });
@@ -124,45 +109,22 @@ app.post("/trigger-frontend", async (req, res) => {
   }
 });
 
-
-// 👇 Allow extra preview domains (optional)
-if (process.env.CORS_EXTRA_ORIGINS) {
-  const extras = process.env.CORS_EXTRA_ORIGINS.split(",").map((o) => o.trim());
-  allowedOrigins.push(...extras);
-}
-
-const ALLOWED = new Set(allowedOrigins);
-
-app.use(
-  cors({
-    origin: (origin, cb) => {
-      if (!origin) return cb(null, true);
-
-      try {
-        const hostname = new URL(origin).hostname;
-        const ok =
-          ALLOWED.has(origin) ||
-          /\.vercel\.app$/.test(hostname) ||
-          hostname.endsWith(".onrender.com");
-
-        if (ok) return cb(null, true);
-        console.warn("🚫 Blocked CORS origin:", origin);
-        cb(new Error("CORS blocked"));
-      } catch (err) {
-        cb(new Error("Invalid CORS origin"));
-      }
-    },
-    credentials: true,
-  })
-);
-
-// ✅ Ensure upload folder exists
+/* ------------------------ 5) FILE UPLOADS (multer) ------------------------ */
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
-// =============================================================
-// DB
-// =============================================================
-const db = new sqlite3.Database(DB_PATH);
+const storage = multer.diskStorage({
+  destination: (_, __, cb) => cb(null, UPLOAD_DIR),
+  filename: (_, file, cb) =>
+    cb(null, Date.now() + "-" + file.originalname.replace(/\s+/g, "_")),
+});
+const upload = multer({ storage });
+
+/* ------------------------ 6) DATABASE ------------------------ */
+const db = new sqlite3.Database(DB_PATH, (err) => {
+  if (err) console.error("❌ DB error:", err.message);
+  else console.log("✅ Connected to SQLite DB");
+});
+
 db.serialize(() => {
   db.run(`CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -201,15 +163,17 @@ db.serialize(() => {
     trackedAt TEXT
   )`);
 
+  // IMEI-change resilience (alias graph)
   db.run(`CREATE TABLE IF NOT EXISTS device_aliases (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     device_id INTEGER,
-    alias_type TEXT,
+    alias_type TEXT,      -- e.g. android_id, wifi_mac, bt_mac, serial, sim_iccid
     alias_value TEXT,
     first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
     last_seen DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
 
+  // Cyber intel cache
   db.run(`CREATE TABLE IF NOT EXISTS cyber_intel (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT,
@@ -217,23 +181,12 @@ db.serialize(() => {
     source TEXT,
     published_at TEXT,
     summary TEXT,
-    embedding TEXT,             -- JSON array string
+    embedding TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
 });
 
-// =============================================================
-// UPLOADS
-// =============================================================
-const storage = multer.diskStorage({
-  destination: (_, __, cb) => cb(null, UPLOAD_DIR),
-  filename: (_, file, cb) => cb(null, Date.now() + "-" + file.originalname.replace(/\s+/g, "_")),
-});
-const upload = multer({ storage });
-
-// =============================================================
-// EMAIL
-// =============================================================
+/* ------------------------ 7) EMAIL (optional) ------------------------ */
 let transporter = null;
 if (process.env.SMTP_USER && process.env.SMTP_PASS && process.env.SMTP_HOST) {
   transporter = nodemailer.createTransport({
@@ -245,31 +198,32 @@ if (process.env.SMTP_USER && process.env.SMTP_PASS && process.env.SMTP_HOST) {
 }
 async function sendEmail(to, subject, html) {
   if (!transporter) return;
+  try { await transporter.sendMail({ from: process.env.SMTP_FROM, to, subject, html }); }
+  catch (e) { console.warn("Email error:", e.message); }
+}
+
+/* ------------------------ 8) GOOGLE SHEETS HELPERS (optional) ------------------------ */
+async function getSheetsAuth() {
   try {
-    await transporter.sendMail({ from: process.env.SMTP_FROM, to, subject, html });
-  } catch (e) {
-    console.warn("Email error:", e.message);
+    let creds = null;
+    if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
+      creds = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+    } else if (process.env.GOOGLE_SERVICE_ACCOUNT_PATH) {
+      creds = require(process.env.GOOGLE_SERVICE_ACCOUNT_PATH);
+    }
+    if (!creds) return null;
+    return new google.auth.GoogleAuth({
+      credentials: creds,
+      scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+    });
+  } catch {
+    return null;
   }
 }
 
-// =============================================================
-// GOOGLE SHEETS
-// =============================================================
-async function getAuth() {
-  let creds;
-  if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON)
-    creds = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
-  else if (process.env.GOOGLE_SERVICE_ACCOUNT_PATH)
-    creds = require(process.env.GOOGLE_SERVICE_ACCOUNT_PATH);
-  if (!creds) return null;
-  return new google.auth.GoogleAuth({
-    credentials: creds,
-    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
-  });
-}
 async function logToSheet(values, range = "Sheet1!A1") {
   if (!process.env.GOOGLE_SHEET_ID) return;
-  const auth = await getAuth();
+  const auth = await getSheetsAuth();
   if (!auth) return;
   const sheets = google.sheets({ version: "v4", auth });
   await sheets.spreadsheets.values.append({
@@ -280,9 +234,7 @@ async function logToSheet(values, range = "Sheet1!A1") {
   });
 }
 
-// =============================================================
-// HELPERS (AUTH + TELEMETRY KEY)
-// =============================================================
+/* ------------------------ 9) AUTH HELPERS ------------------------ */
 function verifyToken(req, res, next) {
   const t = req.headers.authorization?.split(" ")[1];
   if (!t) return res.status(401).json({ error: "No token" });
@@ -299,24 +251,20 @@ function requireTelemetryKey(req, res, next) {
   next();
 }
 
-// =============================================================
-// OpenAI (AI + Embeddings + TTS)
-// =============================================================
+/* ------------------------ 10) OPENAI (optional, guarded) ------------------------ */
 const openai = OPENAI_KEY ? new OpenAI({ apiKey: OPENAI_KEY }) : null;
 
 async function embedText(text) {
   if (!openai) return null;
   const r = await openai.embeddings.create({
     model: EMBED_MODEL,
-    input: text.slice(0, 3000),
+    input: String(text || "").slice(0, 3000),
   });
   return r.data[0].embedding;
 }
 function cosine(a, b) {
   if (!a || !b || a.length !== b.length) return 0;
-  let dot = 0,
-    na = 0,
-    nb = 0;
+  let dot = 0, na = 0, nb = 0;
   for (let i = 0; i < a.length; i++) {
     dot += a[i] * b[i];
     na += a[i] * a[i];
@@ -325,51 +273,32 @@ function cosine(a, b) {
   return dot / (Math.sqrt(na) * Math.sqrt(nb) + 1e-9);
 }
 
-// =============================================================
-// SERVER + SOCKET.IO
-// =============================================================
-const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*"} });
-
-// =============================================================
-// 🧠 CORE ROUTES — PASEARCH Backend Identity
-// =============================================================
-app.get("/", (_, res) => {
-  res.json({
-    service: "PASEARCH Backend API ✅",
-    status: "online",
-    version: "2.0",
-    mission: "Locate, track and recover devices — even if IMEI is changed.",
-    description:
-      "PASEARCH integrates AI, cyber-intel crawling, Google Sheets logging and real-time WebSocket tracking to help users and authorities recover stolen or lost devices.",
-    components: {
-      database: "SQLite (devices, tracking, users)",
-      ai_assistant: "PASEARCH AI with OpenAI + NewsAPI",
-      live_tracking: "Socket.IO real-time updates",
-      sheets_logging: "Google Sheets API logging",
-    },
-    ai_ready: typeof openai !== "undefined",
-    time: new Date().toISOString(),
-  });
-});
-
-// Auth: register/login
+/* ------------------------ 11) CORE AUTH ROUTES ------------------------ */
 app.post("/auth/register", async (req, res) => {
-  const { username, email, password, role, phone } = req.body;
-  if (!username || !email || !password) return res.status(400).json({ error: "Missing fields" });
-  const hash = await bcrypt.hash(password, 10);
-  const r = email === ADMIN_EMAIL ? "admin" : role || "reporter";
-  db.run(
-    "INSERT INTO users (username,email,phone,password,role) VALUES (?,?,?,?,?)",
-    [username, email, phone || null, hash, r],
-    async function (err) {
-      if (err) return res.status(400).json({ error: "User exists" });
-      const token = jwt.sign({ id: this.lastID, username, role: r }, JWT_SECRET, { expiresIn: "7d" });
-      await logToSheet(["REGISTER", username, email, r, new Date().toLocaleString()]);
-      res.json({ success: true, token });
-    }
-  );
+  try {
+    const { username, email, password, role, phone } = req.body;
+    if (!username || !email || !password)
+      return res.status(400).json({ error: "Username, email, password required" });
+
+    const hash = await bcrypt.hash(password, 10);
+    const r = email === ADMIN_EMAIL ? "admin" : role || "reporter";
+
+    db.run(
+      "INSERT INTO users (username,email,phone,password,role) VALUES (?,?,?,?,?)",
+      [username, email, phone || null, hash, r],
+      async function (err) {
+        if (err) return res.status(409).json({ error: "Username or email exists" });
+        const token = jwt.sign({ id: this.lastID, username, role: r }, JWT_SECRET, { expiresIn: "7d" });
+        await logToSheet(["REGISTER", username, email, r, new Date().toLocaleString()]);
+        res.json({ success: true, token });
+      }
+    );
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Register failed" });
+  }
 });
+
 app.post("/auth/login", (req, res) => {
   const { username, password } = req.body;
   db.get("SELECT * FROM users WHERE username=?", [username], async (err, u) => {
@@ -378,68 +307,106 @@ app.post("/auth/login", (req, res) => {
     if (!ok) return res.status(400).json({ error: "Invalid credentials" });
     const t = jwt.sign({ id: u.id, username, role: u.role }, JWT_SECRET, { expiresIn: "7d" });
     await logToSheet(["LOGIN", username, u.role, new Date().toLocaleString()], "Logins!A1");
-    res.json({ success: true, token: t });
+    res.json({ success: true, token: t, user: { id: u.id, username, role: u.role, email: u.email } });
   });
 });
 
-// Report device
-app.post("/report-device", upload.any(), (req, res) => {
-  const { user_id, device_type, imei, reporter_email } = req.body;
-  db.run(
-    "INSERT INTO devices (user_id,device_type,imei,reporter_email) VALUES (?,?,?,?)",
-    [user_id || null, device_type || null, imei || null, reporter_email || null],
-    async function (err) {
-      if (err) return res.status(500).json({ error: "Failed" });
-      await logToSheet(["REPORT", imei, device_type, reporter_email, new Date().toLocaleString()]);
-      res.json({ success: true, id: this.lastID });
-    }
-  );
-});
+/* ------------------------ 12) REPORT / TRACK ------------------------ */
+app.post(
+  "/report-device",
+  upload.fields([{ name: "proof_path" }, { name: "police_report_path" }]),
+  (req, res) => {
+    const {
+      user_id,
+      device_type,
+      imei,
+      color,
+      location_area,
+      lost_type,
+      lost_datetime,
+      reporter_email,
+      police_case_number,
+    } = req.body;
 
-// Track device (with live push)
+    const proof_path = req.files?.proof_path?.[0]?.path || null;
+    const police_path = req.files?.police_report_path?.[0]?.path || null;
+
+    if (!imei || !device_type || !reporter_email)
+      return res.status(400).json({ error: "imei, device_type, reporter_email required" });
+
+    db.run(
+      `INSERT INTO devices (user_id, device_type, imei, color, location_area, lost_type, lost_datetime, reporter_email, police_case_number, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'reported')`,
+      [
+        user_id || null,
+        device_type,
+        imei,
+        color || null,
+        location_area || null,
+        lost_type || null,
+        lost_datetime || null,
+        reporter_email,
+        police_case_number || null,
+      ],
+      async function (err) {
+        if (err) return res.status(500).json({ error: "Failed to report device" });
+        await logToSheet(
+          ["REPORT", imei, device_type, reporter_email, proof_path || "no-proof", police_path || "no-police", new Date().toLocaleString()]
+        );
+        res.json({ success: true, id: this.lastID });
+      }
+    );
+  }
+);
+
 app.post("/track-device", async (req, res) => {
   const { imei, latitude, longitude, address, trackerName } = req.body;
   db.run(
-    "INSERT INTO tracking (imei,latitude,longitude,address,trackerName,trackedAt) VALUES (?,?,?,?,?,datetime('now'))",
+    `INSERT INTO tracking (imei, latitude, longitude, address, trackerName, trackedAt)
+     VALUES (?, ?, ?, ?, ?, datetime('now'))`,
     [imei, latitude, longitude, address, trackerName],
     async (err) => {
-      if (err) return res.status(500).json({ error: err.message });
-      io.emit("tracking_update", { imei, latitude, longitude, address, trackerName });
+      if (err) return res.status(500).json({ error: "DB insert failed" });
+
+      // update devices last_seen + unfreeze
+      db.run("UPDATE devices SET last_seen=datetime('now'), frozen=0 WHERE imei=?", [imei]);
+
+      io.emit("tracking_update", { imei, latitude, longitude, address, trackerName, trackedAt: new Date().toISOString() });
       await logToSheet(["TRACK", imei, latitude, longitude, address, new Date().toLocaleString()]);
       res.json({ success: true });
     }
   );
 });
 
-// Telemetry (API key; IMEI-change resilience via alias graph)
+/* ------------------------ 13) TELEMETRY (IMEI-change resilience) ------------------------ */
 app.post("/ingest/telemetry", requireTelemetryKey, async (req, res) => {
-  const { alias_map = {}, extras = {}, device_id_hint } = req.body;
+  const { alias_map = {}, device_id_hint } = req.body;
   const entries = Object.entries(alias_map).filter(([_, v]) => !!v);
+
   for (const [type, value] of entries) {
     db.run(
-      "INSERT INTO device_aliases (device_id,alias_type,alias_value) VALUES (?,?,?)",
+      "INSERT INTO device_aliases (device_id, alias_type, alias_value) VALUES (?, ?, ?)",
       [device_id_hint || null, String(type).toLowerCase(), String(value).toLowerCase()]
     );
   }
-  // If we know specific device_id, mark last_seen
-  if (device_id_hint) db.run(`UPDATE devices SET last_seen=CURRENT_TIMESTAMP, frozen=0 WHERE id=?`, [device_id_hint]);
+  if (device_id_hint) db.run("UPDATE devices SET last_seen=datetime('now'), frozen=0 WHERE id=?", [device_id_hint]);
+
   await logToSheet(["TELEMETRY", JSON.stringify(alias_map), new Date().toLocaleString()]);
   res.json({ success: true, received: entries.length });
 });
 
-// =============================================================
-// AI: Ask (RAG) + TTS
-// =============================================================
+/* ------------------------ 14) AI: Cyber Intel + RAG Q&A + TTS ------------------------ */
 const rss = new RSSParser();
 
-async function summarize(title, content) {
+async function summarizeForIntel(title, content) {
   if (!openai) return (content || title || "").slice(0, 400);
   const r = await openai.chat.completions.create({
     model: AI_MODEL,
     messages: [
       {
         role: "user",
-        content: `Summarize in 3 concise bullets (focus: cyberlaw, anti-theft, forensics, tracking):\n\n${title}\n\n${content || ""}`,
+        content:
+          `Summarize (<=3 bullets) for cyberlaw/anti-theft/forensics tracking:\nTITLE: ${title}\nCONTENT: ${content || ""}`,
       },
     ],
     temperature: 0.3,
@@ -447,17 +414,17 @@ async function summarize(title, content) {
   return r.choices?.[0]?.message?.content?.trim() || "";
 }
 
-async function upsertIntel(item, src) {
+async function upsertIntelItem(item, source) {
   const url = item.link || item.guid;
   if (!url) return;
   db.get("SELECT id FROM cyber_intel WHERE url=?", [url], async (err, row) => {
     if (row) return;
     const raw = item.contentSnippet || item.content || "";
-    const sum = await summarize(item.title || "(untitled)", raw);
+    const sum = await summarizeForIntel(item.title || "(untitled)", raw);
     const emb = await embedText(`${item.title || ""}\n${sum}`);
     db.run(
-      "INSERT INTO cyber_intel (title,url,source,published_at,summary,embedding) VALUES (?,?,?,?,?,?)",
-      [item.title || "(untitled)", url, src, item.isoDate || item.pubDate || null, sum, emb ? JSON.stringify(emb) : null]
+      "INSERT INTO cyber_intel (title, url, source, published_at, summary, embedding) VALUES (?, ?, ?, ?, ?, ?)",
+      [item.title || "(untitled)", url, source, item.isoDate || item.pubDate || null, sum, emb ? JSON.stringify(emb) : null]
     );
   });
 }
@@ -466,7 +433,9 @@ async function refreshIntel() {
   for (const src of INTEL_SOURCES) {
     try {
       const feed = await rss.parseURL(src);
-      for (const item of feed.items || []) await upsertIntel(item, feed.title || src);
+      for (const item of (feed.items || [])) {
+        await upsertIntelItem(item, feed.title || src);
+      }
     } catch (e) {
       console.warn("RSS fetch failed:", src, e.message);
     }
@@ -474,95 +443,20 @@ async function refreshIntel() {
   await logToSheet(["INTEL_REFRESH", `${INTEL_SOURCES.length} sources`, new Date().toLocaleString()], "Intel!A1");
 }
 
-if (openai && INTEL_SOURCES.length) {
+if (INTEL_SOURCES.length) {
   setInterval(() => refreshIntel().catch(() => {}), Math.max(60_000, INTEL_REFRESH_MINUTES * 60_000));
   setTimeout(() => refreshIntel().catch(() => {}), 10_000);
 }
 
-// Manual refresh
 app.post("/intel/refresh", verifyToken, async (req, res) => {
   try {
     await refreshIntel();
     res.json({ success: true });
-  } catch (e) {
+  } catch {
     res.status(500).json({ error: "Refresh failed" });
   }
 });
 
-// AI Q&A with RAG
-app.post("/ai/ask", async (req, res) => {
-  try {
-    if (!openai) return res.status(503).json({ error: "AI not configured" });
-    const { question } = req.body || {};
-    if (!question) return res.status(400).json({ error: "Missing question" });
-
-    const qvec = await embedText(question);
-    db.all("SELECT * FROM cyber_intel ORDER BY id DESC LIMIT 400", [], async (err, rows) => {
-      if (err || !rows || !rows.length) {
-        const fallback = await openai.chat.completions.create({
-          model: AI_MODEL,
-          messages: [
-            { role: "system", content: "You are PASEARCH AI (cybersecurity/anti-theft)." },
-            { role: "user", content: question },
-          ],
-        });
-        return res.json({ answer: fallback.choices[0].message.content.trim(), usedIntel: [] });
-      }
-      const scored = [];
-      for (const r of rows) {
-        if (!r.embedding) continue;
-        try {
-          const e = JSON.parse(r.embedding);
-          scored.push({ ...r, score: cosine(qvec, e) });
-        } catch {}
-      }
-      scored.sort((a, b) => b.score - a.score);
-      const top = scored.slice(0, 5);
-      const ctx = top.map((t, i) => `#${i + 1} ${t.title}\n${t.summary}`).join("\n\n");
-
-      const resp = await openai.chat.completions.create({
-        model: AI_MODEL,
-        messages: [
-          { role: "system", content: "You are PASEARCH AI—device recovery & cyberlaw assistant." },
-          { role: "user", content: `${question}\n\nContext:\n${ctx}` },
-        ],
-        temperature: 0.2,
-      });
-
-      res.json({
-        answer: resp.choices[0].message.content.trim(),
-        usedIntel: top.map((t) => ({ title: t.title, url: t.url, source: t.source, score: t.score })),
-      });
-    });
-  } catch (e) {
-    console.error("AI ask error:", e);
-    res.status(500).json({ error: "AI failed to respond" });
-  }
-});
-
-// Text-to-Speech
-app.post("/ai/tts", async (req, res) => {
-  try {
-    if (!openai) return res.status(503).json({ error: "AI not configured" });
-    const { text } = req.body || {};
-    if (!text) return res.status(400).json({ error: "Missing text" });
-    const speech = await openai.audio.speech.create({
-      model: "gpt-4o-mini-tts",
-      voice: "alloy",
-      input: text.slice(0, 2000),
-      format: "mp3",
-    });
-    const b64 = Buffer.from(await speech.arrayBuffer()).toString("base64");
-    res.json({ audio: `data:audio/mpeg;base64,${b64}` });
-  } catch (e) {
-    console.error("TTS error:", e);
-    res.status(500).json({ error: "TTS failed" });
-  }
-});
-
-// =============================================================
-// ADMIN NEWS FEED (Cyberlaw / theft / PASEARCH-related)
-// =============================================================
 app.get("/admin/news", async (req, res) => {
   db.all(
     `SELECT title,url,source,summary,published_at
@@ -575,7 +469,7 @@ app.get("/admin/news", async (req, res) => {
       if (err) return res.status(500).json({ error: err.message });
       res.json({
         updated: new Date().toISOString(),
-        articles: rows.map((r) => ({
+        articles: (rows || []).map((r) => ({
           title: r.title,
           url: r.url,
           source: r.source,
@@ -587,26 +481,139 @@ app.get("/admin/news", async (req, res) => {
   );
 });
 
-// =============================================================
-// FROZEN DEVICE DETECTOR (silent >30m)
-// =============================================================
+// Enhanced AI Ask (RAG + optional News API + personalized hints)
+app.post("/ai/ask", async (req, res) => {
+  try {
+    const { question } = req.body || {};
+    if (!question) return res.status(400).json({ answer: "No question provided." });
+
+    let answer = "";
+
+    // IMEI quick lookup
+    const imeiMatch = question.match(/\b\d{10,17}\b/);
+    if (imeiMatch) {
+      const imei = imeiMatch[0];
+      const row = await new Promise((resolve, reject) => {
+        db.get("SELECT * FROM devices WHERE imei = ?", [imei], (err, r) => (err ? reject(err) : resolve(r)));
+      });
+      if (row) {
+        answer += `🔎 IMEI ${imei} found — ${row.device_type || "Unknown"} (${row.color || "-"})\nStatus: ${row.status}\nArea: ${row.location_area || "N/A"}\n\n`;
+      } else {
+        answer += `❌ IMEI ${imei} not found in system.\n\n`;
+      }
+    }
+
+    // Optional cyber news via NewsAPI
+    if (process.env.NEWS_API_KEY) {
+      try {
+        const url =
+          "https://newsapi.org/v2/everything?q=cybercrime%20OR%20hacking%20law&language=en&sortBy=publishedAt&pageSize=3&apiKey=" +
+          process.env.NEWS_API_KEY;
+        const r = await fetch(url);
+        const j = await r.json();
+        if (j?.articles?.length) {
+          answer += "📰 Latest Cyber-Intel:\n" + j.articles.map((a) => `• ${a.title} — ${a.source?.name}`).join("\n") + "\n\n";
+        }
+      } catch {
+        // silent
+      }
+    }
+
+    // Personalized recovery advice
+    if (/lost|stolen|recover|track/i.test(question)) {
+      answer +=
+        "🧭 Recovery Advice:\n" +
+        "- Ensure the device report is filed in PASEARCH and marked 'Under Investigation'.\n" +
+        "- Keep IMEI & proofs ready; only share with verified police/telecom partners.\n" +
+        "- Monitor the dashboard for GPS/telemetry updates.\n" +
+        "- Follow up your police report with any new locations.\n\n";
+    }
+
+    // RAG over cached intel (if OpenAI available)
+    if (openai) {
+      const qvec = await embedText(question);
+      db.all("SELECT * FROM cyber_intel ORDER BY id DESC LIMIT 400", [], async (err, rows) => {
+        if (err || !rows || !rows.length || !qvec) {
+          const fb = await openai.chat.completions.create({
+            model: AI_MODEL,
+            messages: [
+              { role: "system", content: "You are PASEARCH AI (cybersecurity & device recovery)." },
+              { role: "user", content: question + "\n\n" + answer },
+            ],
+          });
+          return res.json({ answer: (fb.choices?.[0]?.message?.content || "").trim(), usedIntel: [] });
+        }
+        const scored = [];
+        for (const r of rows) {
+          if (!r.embedding) continue;
+          try {
+            const e = JSON.parse(r.embedding);
+            scored.push({ ...r, score: cosine(qvec, e) });
+          } catch {}
+        }
+        scored.sort((a, b) => b.score - a.score);
+        const top = scored.slice(0, 5);
+        const ctx = top.map((t, i) => `#${i + 1} ${t.title}\n${t.summary}`).join("\n\n");
+
+        const resp = await openai.chat.completions.create({
+          model: AI_MODEL,
+          messages: [
+            { role: "system", content: "You are PASEARCH AI — device recovery & cyberlaw assistant." },
+            { role: "user", content: `${question}\n\nExisting info:\n${answer}\n\nContext:\n${ctx}` },
+          ],
+          temperature: 0.2,
+        });
+        res.json({
+          answer: (resp.choices?.[0]?.message?.content || "").trim(),
+          usedIntel: top.map((t) => ({ title: t.title, url: t.url, source: t.source, score: t.score })),
+        });
+      });
+    } else {
+      res.json({ answer: (answer || "AI is not configured (set OPENAI_API_KEY).").trim(), usedIntel: [] });
+    }
+  } catch (e) {
+    console.error("AI ask error:", e);
+    res.status(500).json({ answer: "Internal AI error." });
+  }
+});
+
+// TTS (optional)
+app.post("/ai/tts", async (req, res) => {
+  try {
+    if (!openai) return res.status(503).json({ error: "AI not configured" });
+    const { text } = req.body || {};
+    if (!text) return res.status(400).json({ error: "Missing text" });
+    const speech = await openai.audio.speech.create({
+      model: "gpt-4o-mini-tts",
+      voice: "alloy",
+      input: String(text).slice(0, 2000),
+      format: "mp3",
+    });
+    const b64 = Buffer.from(await speech.arrayBuffer()).toString("base64");
+    res.json({ audio: `data:audio/mpeg;base64,${b64}` });
+  } catch (e) {
+    console.error("TTS error:", e);
+    res.status(500).json({ error: "TTS failed" });
+  }
+});
+
+/* ------------------------ 15) FROZEN DETECTOR ------------------------ */
 setInterval(() => {
-  const cutoff = Date.now() - 30 * 60 * 1000;
-  const iso = new Date(cutoff).toISOString();
+  const cutoffIso = new Date(Date.now() - 30 * 60 * 1000).toISOString(); // 30 mins
   db.all(
     "SELECT id, imei, device_type FROM devices WHERE (last_seen IS NULL OR last_seen < ?) AND frozen=0",
-    [iso],
+    [cutoffIso],
     (err, rows) => {
-      if (!rows || !rows.length) return;
+      if (err || !rows || !rows.length) return;
       for (const d of rows) {
         db.run("UPDATE devices SET frozen=1 WHERE id=?", [d.id]);
-        io.emit("device_frozen", { id: d.id, imei: d.imei });
+        io.emit("device_frozen", { id: d.id, imei: d.imei, device_type: d.device_type });
         logToSheet(["FROZEN", d.imei || "N/A", d.device_type || "Unknown", new Date().toLocaleString()]);
         if (ADMIN_EMAIL) {
           sendEmail(
             ADMIN_EMAIL,
             "PASEARCH — Device Frozen",
-            `<p>Device <b>${d.device_type || "Unknown"}</b> (IMEI: ${d.imei || "N/A"}) is marked <b>FROZEN</b>.</p>`
+            `<p>Device <b>${d.device_type || "Unknown"}</b> (IMEI: ${d.imei || "N/A"}) marked <b>FROZEN</b>.</p>`
           );
         }
       }
@@ -614,133 +621,30 @@ setInterval(() => {
   );
 }, 5 * 60 * 1000);
 
-// ======================================================
-// 🤖 PASEARCH AI — Enhanced /ai/ask route
-// ======================================================
+/* ------------------------ 16) (OPTIONAL) MOUNT EXTRA ROUTERS ------------------------ */
+/* 
+   If you still have separate files:
+   const adminRoutes = require("./routes/admin");
+   app.use("/admin", adminRoutes);
 
-app.post("/ai/ask", async (req, res) => {
-  const { query } = req.body;
-  if (!query) return res.status(400).json({ answer: "No question provided." });
+   const authRoutes = require("./routes/auth");
+   app.use("/auth", authRoutes);
 
-  try {
-    let answer = "";
+   const aiRoutes = require("./routes/aiIntel");
+   app.use("/ai", aiRoutes);
+   // ⚠️ Make sure you DO NOT duplicate these lines elsewhere.
+*/
 
-    // 1️⃣ IMEI lookup in database
-    const imeiMatch = query.match(/\b\d{10,17}\b/);
-    if (imeiMatch) {
-      const imei = imeiMatch[0];
-      answer += `🔎 Checking device IMEI ${imei} in database...\n\n`;
+/* ------------------------ 17) SERVER + SOCKET.IO START ------------------------ */
+const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: "*" } });
 
-      const row = await new Promise((resolve, reject) => {
-        db.get("SELECT * FROM devices WHERE imei = ?", [imei], (err, r) =>
-          err ? reject(err) : resolve(r)
-        );
-      });
-
-      if (row) {
-        answer += `✅ Device found: ${row.device_type || "Unknown"} (${row.color || "No color"})\n`;
-        answer += `Status: ${row.status}\nReported Area: ${row.location_area || "N/A"}\n\n`;
-      } else {
-        answer += "❌ This IMEI isn’t yet registered in the PASEARCH system.\n\n";
-      }
-    }
-
-    // 2️⃣ Cyber-Intel lookup (latest news)
-    const newsURL =
-      "https://newsapi.org/v2/everything?q=cybercrime+OR+hacking+law&language=en&sortBy=publishedAt&pageSize=3&apiKey=" +
-      process.env.NEWS_API_KEY;
-
-    let intelText = "";
-    try {
-      const newsRes = await fetch(newsURL);
-      const newsData = await newsRes.json();
-      if (newsData?.articles?.length) {
-        intelText =
-          "📰 Latest Cyber-Intel:\n" +
-          newsData.articles
-            .map((a) => `• ${a.title} — ${a.source.name}`)
-            .join("\n") +
-          "\n\n";
-      }
-    } catch (e) {
-      intelText = "⚠️ Could not load cyber-intel feed right now.\n\n";
-    }
-    answer += intelText;
-
-    // 3️⃣ Personalized recovery advice
-    if (/lost|stolen|recover|track/i.test(query)) {
-      answer +=
-        "🧭 Recovery Advice:\n" +
-        "- Ensure your device is reported in PASEARCH and marked 'Under Investigation'.\n" +
-        "- Keep your IMEI ready and only share it with verified police/telecom partners.\n" +
-        "- Check your dashboard for GPS or tracking updates.\n" +
-        "- File or follow up your police report as needed.\n\n";
-    }
-
-    // 4️⃣ Optional OpenAI summary
-    try {
-      const OpenAI = (await import("openai")).default;
-      const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-      const completion = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [
-          { role: "system", content: "You are PASEARCH AI, a cybersecurity recovery assistant." },
-          { role: "user", content: answer + "\n\nUser question: " + query },
-        ],
-        max_tokens: 300,
-      });
-      answer = completion.choices[0].message.content;
-    } catch (err) {
-      console.log("OpenAI summarizer skipped:", err.message);
-    }
-
-    res.json({ answer });
-  } catch (err) {
-    console.error("AI route error:", err);
-    res.status(500).json({
-      answer: "⚠️ Internal error while processing your request. Please try again later.",
-    });
-  }
+io.on("connection", (socket) => {
+  console.log("🧩 Socket connected:", socket.id);
+  socket.on("disconnect", () => console.log("❌ Socket disconnected:", socket.id));
 });
 
-// =============================================================
-// ✅ ROUTE IMPORTS (AFTER app IS INITIALIZED)
-// =============================================================
-const adminRoutes = require("./routes/admin");
-app.use("/admin", adminRoutes);
-
-const authRoutes = require("./routes/auth");
-app.use("/auth", authRoutes);
-
-const aiRoutes = require("./routes/aiIntel");
-app.use("/ai", aiRoutes); // ✅ AI route mounted
-
-// Default route
-app.get("/", (_, res) => res.send("Welcome to PASEARCH Backend ✅"));
-
-// =============================================================
-// 🚀 FRONTEND REDEPLOY TRIGGER (Vercel)
-// =============================================================
-app.post("/trigger-frontend", async (req, res) => {
-  try {
-    const hook = process.env.VERCEL_DEPLOY_HOOK_URL;
-    if (!hook)
-      return res.status(400).json({ error: "VERCEL_DEPLOY_HOOK_URL not set" });
-
-    const response = await fetch(hook, { method: "POST" });
-    if (!response.ok)
-      throw new Error(`Vercel trigger failed: ${response.statusText}`);
-
-    res.json({ success: true, message: "Frontend redeploy triggered" });
-  } catch (error) {
-    console.error("Trigger-frontend error:", error.message);
-    res.status(500).json({ error: "Failed to trigger frontend redeploy" });
-  }
-});
-
-// =============================================================
-// START SERVER
-// =============================================================
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 PASEARCH Backend + AI running on port ${PORT}`);
+  console.log(`🚀 PASEARCH Backend running on port ${PORT}`);
+  if (process.env.GOOGLE_SHEET_ID) console.log("✅ Google Sheets logging enabled");
 });
