@@ -91,6 +91,52 @@ const allowedOrigins = [
   "https://pasearch-frontend.vercel.app", // ✅ your live frontend
 ];
 
+// =============================================================
+// ✅ CORE ROUTES — HEALTH, DEPLOY TRIGGER, AND SUBROUTES
+// =============================================================
+
+// ✅ Health check route
+app.get("/", (_, res) =>
+  res.json({
+    ok: true,
+    service: "PASEARCH Backend",
+    mission: "Locate, track & recover devices (IMEI-change resilient)",
+    time: new Date().toISOString(),
+  })
+);
+
+// ✅ Frontend redeploy trigger (using native fetch, Node 18+)
+app.post("/trigger-frontend", async (req, res) => {
+  try {
+    const hook = process.env.VERCEL_DEPLOY_HOOK_URL;
+    if (!hook)
+      return res.status(400).json({ error: "VERCEL_DEPLOY_HOOK_URL not set" });
+
+    const response = await fetch(hook, { method: "POST" });
+    if (!response.ok)
+      throw new Error(`Vercel trigger failed: ${response.statusText}`);
+
+    console.log("✅ Frontend redeploy triggered");
+    res.json({ success: true, message: "Frontend redeploy triggered" });
+  } catch (error) {
+    console.error("❌ Trigger error:", error.message);
+    res.status(500).json({ error: "Failed to trigger frontend redeploy" });
+  }
+});
+
+// =============================================================
+// ✅ ROUTE IMPORTS (AFTER app IS INITIALIZED)
+// =============================================================
+const adminRoutes = require("./routes/admin");
+app.use("/admin", adminRoutes);
+
+const authRoutes = require("./routes/auth");
+app.use("/auth", authRoutes);
+
+const aiRoutes = require("./routes/aiIntel");
+app.use("/ai", aiRoutes);
+
+
 // 👇 Allow extra preview domains (optional)
 if (process.env.CORS_EXTRA_ORIGINS) {
   const extras = process.env.CORS_EXTRA_ORIGINS.split(",").map((o) => o.trim());
