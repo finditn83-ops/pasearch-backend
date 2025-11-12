@@ -657,6 +657,28 @@ app.use("/auth", authRoutes);
 // Default route
 app.get("/", (_, res) => res.send("Welcome to PASEARCH Backend ✅"));
 
+
+// =============================================================
+// 🚀 FRONTEND REDEPLOY TRIGGER (Vercel)
+// =============================================================
+app.post("/trigger-frontend", async (req, res) => {
+  try {
+    const hook = process.env.VERCEL_DEPLOY_HOOK_URL;
+    if (!hook)
+      return res.status(400).json({ error: "VERCEL_DEPLOY_HOOK_URL not set" });
+
+    const response = await fetch(hook, { method: "POST" });
+    if (!response.ok)
+      throw new Error(`Vercel trigger failed: ${response.statusText}`);
+
+    res.json({ success: true, message: "Frontend redeploy triggered" });
+  } catch (error) {
+    console.error("Trigger-frontend error:", error.message);
+    res.status(500).json({ error: "Failed to trigger frontend redeploy" });
+  }
+});
+
+
 // =============================================================
 // START SERVER
 // =============================================================

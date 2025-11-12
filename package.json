@@ -12,8 +12,9 @@
     "deploy-all": "npm run deploy-backend && npm run deploy-frontend",
     "postinstall": "curl -X POST https://pasearch-backend.onrender.com/trigger-frontend || true"
   },
-  "author": "Finditn (Benny)",
+  "author": "Finditn (Finditn)",
   "license": "MIT",
+  "type": "commonjs",
   "dependencies": {
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",
