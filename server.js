@@ -552,7 +552,6 @@ setInterval(() => {
 // ======================================================
 // 🤖 PASEARCH AI — Enhanced /ai/ask route
 // ======================================================
-import fetch from "node-fetch"; // if you're using ES modules; otherwise use require() below
 
 app.post("/ai/ask", async (req, res) => {
   const { query } = req.body;
