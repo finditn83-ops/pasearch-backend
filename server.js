@@ -55,17 +55,20 @@ const app = express();
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-// ----------------------------
-// 4️⃣ CORS Configuration
-// ----------------------------
+// =============================================================
+// 🌐 CORS CONFIGURATION — Local + Render + Vercel
+// =============================================================
 const allowedOrigins = [
   "http://localhost:5173",
   "http://localhost:3000",
   "https://pasearch-frontend.vercel.app",
 ];
+
 if (process.env.CORS_EXTRA_ORIGINS) {
-  allowedOrigins.push(...process.env.CORS_EXTRA_ORIGINS.split(","));
+  const extras = process.env.CORS_EXTRA_ORIGINS.split(",").map((o) => o.trim());
+  allowedOrigins.push(...extras);
 }
+
 const ALLOWED = new Set(allowedOrigins);
 
 app.use(
