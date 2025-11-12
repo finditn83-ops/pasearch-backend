@@ -124,18 +124,6 @@ app.post("/trigger-frontend", async (req, res) => {
   }
 });
 
-// =============================================================
-// ✅ ROUTE IMPORTS (AFTER app IS INITIALIZED)
-// =============================================================
-const adminRoutes = require("./routes/admin");
-app.use("/admin", adminRoutes);
-
-const authRoutes = require("./routes/auth");
-app.use("/auth", authRoutes);
-
-const aiRoutes = require("./routes/aiIntel");
-app.use("/ai", aiRoutes);
-
 
 // 👇 Allow extra preview domains (optional)
 if (process.env.CORS_EXTRA_ORIGINS) {
@@ -716,23 +704,19 @@ app.post("/ai/ask", async (req, res) => {
 });
 
 // =============================================================
-// ROUTES
+// ✅ ROUTE IMPORTS (AFTER app IS INITIALIZED)
 // =============================================================
-
-// ✅ Import your new AI routes
-const aiRoutes = require("./routes/aiIntel");
-app.use("/ai", aiRoutes);
-
-// ✅ Import other route modules
 const adminRoutes = require("./routes/admin");
-const authRoutes = require("./routes/auth");
-
 app.use("/admin", adminRoutes);
+
+const authRoutes = require("./routes/auth");
 app.use("/auth", authRoutes);
+
+const aiRoutes = require("./routes/aiIntel");
+app.use("/ai", aiRoutes); // ✅ AI route mounted
 
 // Default route
 app.get("/", (_, res) => res.send("Welcome to PASEARCH Backend ✅"));
-
 
 // =============================================================
 // 🚀 FRONTEND REDEPLOY TRIGGER (Vercel)
@@ -753,7 +737,6 @@ app.post("/trigger-frontend", async (req, res) => {
     res.status(500).json({ error: "Failed to trigger frontend redeploy" });
   }
 });
-
 
 // =============================================================
 // START SERVER
