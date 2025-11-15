@@ -90,6 +90,10 @@ app.use(
   })
 );
 
+// 5️⃣ Body Parsers
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true }));
+
 // ----------------------------
 // 5️⃣ File Uploads + DB Init
 // ----------------------------
