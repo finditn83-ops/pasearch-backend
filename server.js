@@ -1,6 +1,6 @@
 // =============================================================
 // 🚀 PASEARCH BACKEND — Locate, Track & Recover Devices
-// Includes: AI Assistant (OpenAI), Cyber Intel Feed, Socket.IO Tracking
+// Includes: AI Assistant, Cyber Intel Feed, Socket.IO Tracking
 // =============================================================
 
 // ----------------------------
@@ -29,12 +29,19 @@ const PORT = process.env.PORT || 5000;
 const DB_PATH = path.join(__dirname, "devices.db");
 const UPLOAD_DIR = path.join(__dirname, "uploads");
 const JWT_SECRET = process.env.JWT_SECRET || "dev_secret";
+
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "admin@example.com";
 const TELEMETRY_API_KEY = process.env.TELEMETRY_API_KEY || "telemetry_key";
 const OPENAI_KEY = process.env.OPENAI_API_KEY || "";
+
+// ⭐ IMPORTANT: Your frontend URL (Render env or fallback)
+const FRONTEND_URL =
+  process.env.FRONTEND_URL || "https://pasearch-frontend.vercel.app";
+
 const AI_MODEL = process.env.AI_MODEL || "gpt-4o-mini";
 const EMBED_MODEL = process.env.EMBED_MODEL || "text-embedding-3-small";
 const INTEL_REFRESH_MINUTES = Number(process.env.INTEL_REFRESH_MINUTES || 180);
+
 const INTEL_SOURCES = (
   process.env.INTEL_SOURCES ||
   [
@@ -55,38 +62,28 @@ const app = express();
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-// =============================================================
-// 🌐 CORS CONFIGURATION — Local + Render + Vercel
-// =============================================================
-const allowedOrigins = [
-  "http://localhost:5173",
-  "http://localhost:3000",
-  "https://pasearch-frontend.vercel.app",
-];
-
-if (process.env.CORS_EXTRA_ORIGINS) {
-  const extras = process.env.CORS_EXTRA_ORIGINS.split(",").map((o) => o.trim());
-  allowedOrigins.push(...extras);
-}
-
-const ALLOWED = new Set(allowedOrigins);
-
+// ----------------------------
+// 4️⃣ CORS FIX (Render + Vercel Support)
+// ----------------------------
 app.use(
   cors({
     origin: (origin, cb) => {
-      if (!origin) return cb(null, true);
+      const allowed = [FRONTEND_URL]; // Only your frontend URL
+
+      if (!origin) return cb(null, true); // allow mobile apps/Postman/cURL
+
+      let hostname;
       try {
-        const hostname = new URL(origin).hostname;
-        const ok =
-          ALLOWED.has(origin) ||
-          /\.vercel\.app$/.test(hostname) ||
-          hostname.endsWith(".onrender.com");
-        if (ok) return cb(null, true);
-        console.warn("🚫 Blocked CORS origin:", origin);
-        cb(new Error("CORS blocked"));
+        hostname = new URL(origin).hostname;
       } catch {
-        cb(new Error("Invalid CORS origin"));
+        return cb(new Error("CORS: Invalid origin"), false);
       }
+
+      const ok =
+        allowed.includes(origin) ||
+        hostname.endsWith(".vercel.app"); // allow Vercel previews
+
+      return cb(ok ? null : new Error("CORS blocked"), ok);
     },
     credentials: true,
   })
