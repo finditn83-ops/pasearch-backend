@@ -37,6 +37,7 @@ const OPENAI_KEY = process.env.OPENAI_API_KEY || "";
 // ⭐ IMPORTANT: Your frontend URL (Render env or fallback)
 const FRONTEND_URL =
   process.env.FRONTEND_URL || "https://pasearch-frontend.vercel.app";
+console.log("🔥 FRONTEND_URL from Render:", FRONTEND_URL);
 
 const AI_MODEL = process.env.AI_MODEL || "gpt-4o-mini";
 const EMBED_MODEL = process.env.EMBED_MODEL || "text-embedding-3-small";
