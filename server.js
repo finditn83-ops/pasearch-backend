@@ -1,105 +1,70 @@
-// =============================================================
-// 🚀 PASEARCH BACKEND — Locate, Track & Recover Devices
-// Includes: AI Assistant, Cyber Intel Feed, Socket.IO Tracking
-// =============================================================
+/* =============================================================
+   🚀 PASEARCH BACKEND (MVP Version)
+   Locate, Track & Recover Devices — IMEI-change resilient
+   Includes:
+   - Authentication (Register / Login)
+   - Device reporting
+   - Live tracking (Socket.IO)
+   - IMEI + Google/Apple email + phone AI-matching
+   - Google Sheets logging
+   - Admin dashboard routes
+   ============================================================= */
 
-// ----------------------------
-// 1️⃣ Imports
-// ----------------------------
+require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const sqlite3 = require("sqlite3").verbose();
-const multer = require("multer");
-const nodemailer = require("nodemailer");
 const path = require("path");
 const fs = require("fs");
 const http = require("http");
 const { Server } = require("socket.io");
 const { google } = require("googleapis");
-const RSSParser = require("rss-parser");
-const OpenAI = require("openai");
-require("dotenv").config();
 
 // ----------------------------
-// 2️⃣ Configuration
+// 1️⃣ CONFIG
 // ----------------------------
 const PORT = process.env.PORT || 5000;
 const DB_PATH = path.join(__dirname, "devices.db");
-const UPLOAD_DIR = path.join(__dirname, "uploads");
 const JWT_SECRET = process.env.JWT_SECRET || "dev_secret";
-
-const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "admin@example.com";
-const TELEMETRY_API_KEY = process.env.TELEMETRY_API_KEY || "telemetry_key";
-const OPENAI_KEY = process.env.OPENAI_API_KEY || "";
-
-// ⭐ IMPORTANT: Your frontend URL (Render env or fallback)
 const FRONTEND_URL =
-  process.env.FRONTEND_URL || "https://pasearch-frontend.vercel.app";
-console.log("🔥 FRONTEND_URL from Render:", FRONTEND_URL);
+  process.env.FRONTEND_URL || "http://localhost:5173";
 
-const AI_MODEL = process.env.AI_MODEL || "gpt-4o-mini";
-const EMBED_MODEL = process.env.EMBED_MODEL || "text-embedding-3-small";
-const INTEL_REFRESH_MINUTES = Number(process.env.INTEL_REFRESH_MINUTES || 180);
-
-const INTEL_SOURCES = (
-  process.env.INTEL_SOURCES ||
-  [
-    "https://krebsonsecurity.com/feed/",
-    "https://www.bleepingcomputer.com/feed/",
-    "https://www.schneier.com/feed/atom/",
-    "https://feeds.feedburner.com/TheHackersNews",
-  ].join(",")
-)
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
+console.log("🔥 FRONTEND_URL:", FRONTEND_URL);
 
 // ----------------------------
-// 3️⃣ Initialize Express App
+// 2️⃣ INIT APP
 // ----------------------------
 const app = express();
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
 // ----------------------------
-// 4️⃣ CORS FIX (Render + Vercel Support)
+// 3️⃣ CORS
 // ----------------------------
 app.use(
   cors({
     origin: (origin, cb) => {
-      const allowed = [FRONTEND_URL]; // Only your frontend URL
+      if (!origin) return cb(null, true);
+      if (origin === FRONTEND_URL || origin.endsWith(".vercel.app"))
+        return cb(null, true);
 
-      if (!origin) return cb(null, true); // allow mobile apps/Postman/cURL
-
-      let hostname;
-      try {
-        hostname = new URL(origin).hostname;
-      } catch {
-        return cb(new Error("CORS: Invalid origin"), false);
-      }
-
-      const ok =
-        allowed.includes(origin) ||
-        hostname.endsWith(".vercel.app"); // allow Vercel previews
-
-      return cb(ok ? null : new Error("CORS blocked"), ok);
+      return cb(new Error("CORS blocked"), false);
     },
     credentials: true,
   })
 );
 
-// 5️⃣ Body Parsers
-app.use(express.json({ limit: "10mb" }));
-app.use(express.urlencoded({ extended: true }));
-
 // ----------------------------
-// 5️⃣ File Uploads + DB Init
+// 4️⃣ SQLITE DB INITIALIZATION
 // ----------------------------
-if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+const db = new sqlite3.Database(DB_PATH, (err) => {
+  if (err) console.error("❌ DB error:", err.message);
+  else console.log("📁 SQLite DB connected.");
+});
 
-const db = new sqlite3.Database(DB_PATH);
+// Tables
 db.serialize(() => {
   db.run(`CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -125,6 +90,9 @@ db.serialize(() => {
     status TEXT DEFAULT 'reported',
     frozen INTEGER DEFAULT 0,
     last_seen DATETIME,
+    google_account_email TEXT,
+    apple_id_email TEXT,
+    contact_hint TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
 
@@ -137,58 +105,29 @@ db.serialize(() => {
     trackerName TEXT,
     trackedAt TEXT
   )`);
-
-  db.run(`CREATE TABLE IF NOT EXISTS cyber_intel (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT,
-    url TEXT UNIQUE,
-    source TEXT,
-    published_at TEXT,
-    summary TEXT,
-    embedding TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  )`);
 });
 
 // ----------------------------
-// 6️⃣ Email + Google Sheets
+// 5️⃣ GOOGLE SHEETS LOGGING
 // ----------------------------
-let transporter = null;
-if (process.env.SMTP_USER && process.env.SMTP_PASS && process.env.SMTP_HOST) {
-  transporter = nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: Number(process.env.SMTP_PORT) || 465,
-    secure: Number(process.env.SMTP_PORT || 465) === 465,
-    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-  });
-}
+async function getSheetsClient() {
+  if (!process.env.GOOGLE_SERVICE_ACCOUNT_JSON) return null;
 
-async function sendEmail(to, subject, html) {
-  if (!transporter) return;
-  try {
-    await transporter.sendMail({ from: process.env.SMTP_FROM, to, subject, html });
-  } catch (e) {
-    console.warn("Email error:", e.message);
-  }
-}
+  const creds = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
 
-async function getAuth() {
-  let creds;
-  if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON)
-    creds = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
-  else if (process.env.GOOGLE_SERVICE_ACCOUNT_PATH)
-    creds = require(process.env.GOOGLE_SERVICE_ACCOUNT_PATH);
-  if (!creds) return null;
   return new google.auth.GoogleAuth({
     credentials: creds,
     scopes: ["https://www.googleapis.com/auth/spreadsheets"],
   });
 }
-async function logToSheet(values, range = "Sheet1!A1") {
+
+async function logToSheet(values, range = "Logs!A1") {
   if (!process.env.GOOGLE_SHEET_ID) return;
-  const auth = await getAuth();
+  const auth = await getSheetsClient();
   if (!auth) return;
+
   const sheets = google.sheets({ version: "v4", auth });
+
   await sheets.spreadsheets.values.append({
     spreadsheetId: process.env.GOOGLE_SHEET_ID,
     range,
@@ -198,90 +137,94 @@ async function logToSheet(values, range = "Sheet1!A1") {
 }
 
 // ----------------------------
-// 7️⃣ Helpers
+// 6️⃣ AUTH MIDDLEWARE
 // ----------------------------
-function verifyToken(req, res, next) {
-  const t = req.headers.authorization?.split(" ")[1];
-  if (!t) return res.status(401).json({ error: "No token" });
+function requireAuth(req, res, next) {
+  const token = req.headers.authorization?.split(" ")[1];
+  if (!token) return res.status(401).json({ error: "No token" });
+
   try {
-    req.user = jwt.verify(t, JWT_SECRET);
+    req.user = jwt.verify(token, JWT_SECRET);
     next();
   } catch {
     res.status(403).json({ error: "Invalid token" });
   }
 }
-function requireTelemetryKey(req, res, next) {
-  const key = req.headers["x-pasearch-key"];
-  if (key !== TELEMETRY_API_KEY)
-    return res.status(401).json({ error: "Invalid API key" });
-  next();
-}
 
 // ----------------------------
-// 8️⃣ OpenAI + RSS Setup
+// 7️⃣ ADMIN ROUTES
 // ----------------------------
-const openai = OPENAI_KEY ? new OpenAI({ apiKey: OPENAI_KEY }) : null;
-const rss = new RSSParser();
-function cosine(a, b) {
-  if (!a || !b || a.length !== b.length) return 0;
-  let dot = 0,
-    na = 0,
-    nb = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    na += a[i] * a[i];
-    nb += b[i] * b[i];
-  }
-  return dot / (Math.sqrt(na) * Math.sqrt(nb) + 1e-9);
-}
+app.get("/admin/users", requireAuth, (req, res) => {
+  if (req.user.role !== "admin")
+    return res.status(403).json({ error: "Forbidden" });
+
+  db.all(
+    "SELECT id, username, email, role FROM users",
+    [],
+    (err, rows) => {
+      if (err) return res.status(500).json({ error: "DB error" });
+      res.json({ users: rows });
+    }
+  );
+});
+
+app.get("/admin/devices", requireAuth, (req, res) => {
+  if (req.user.role !== "admin")
+    return res.status(403).json({ error: "Forbidden" });
+
+  db.all(
+    "SELECT id, imei, device_type, status, reporter_email FROM devices",
+    [],
+    (err, rows) => {
+      if (err) return res.status(500).json({ error: "DB error" });
+      res.json({ devices: rows });
+    }
+  );
+});
 
 // ----------------------------
-// 9️⃣ Core Routes
+// 8️⃣ HEALTH CHECK
 // ----------------------------
-
-// ✅ Health check
-app.get("/", (_, res) =>
+app.get("/", (req, res) =>
   res.json({
     ok: true,
-    service: "PASEARCH Backend",
-    mission: "Locate, track & recover devices (IMEI-change resilient)",
+    service: "PASEARCH Backend MVP",
     time: new Date().toISOString(),
   })
 );
 
-// ✅ Frontend redeploy (native fetch)
-app.post("/trigger-frontend", async (req, res) => {
-  try {
-    const hook = process.env.VERCEL_DEPLOY_HOOK_URL;
-    if (!hook)
-      return res.status(400).json({ error: "VERCEL_DEPLOY_HOOK_URL not set" });
-    const response = await fetch(hook, { method: "POST" });
-    if (!response.ok)
-      throw new Error(`Vercel trigger failed: ${response.statusText}`);
-    console.log("✅ Frontend redeploy triggered");
-    res.json({ success: true, message: "Frontend redeploy triggered" });
-  } catch (error) {
-    console.error("❌ Trigger error:", error.message);
-    res.status(500).json({ error: "Failed to trigger frontend redeploy" });
-  }
-});
-
-// 🔐 Auth
+// ----------------------------
+// 9️⃣ AUTH ROUTES
+// ----------------------------
 app.post("/auth/register", async (req, res) => {
   const { username, email, password, role, phone } = req.body;
+
   if (!username || !email || !password)
     return res.status(400).json({ error: "Missing fields" });
+
   const hash = await bcrypt.hash(password, 10);
-  const r = email === ADMIN_EMAIL ? "admin" : role || "reporter";
+  const finalRole = role || "reporter";
+
   db.run(
     "INSERT INTO users (username,email,phone,password,role) VALUES (?,?,?,?,?)",
-    [username, email, phone || null, hash, r],
+    [username, email, phone || null, hash, finalRole],
     async function (err) {
       if (err) return res.status(400).json({ error: "User exists" });
-      const token = jwt.sign({ id: this.lastID, username, role: r }, JWT_SECRET, {
-        expiresIn: "7d",
-      });
-      await logToSheet(["REGISTER", username, email, r, new Date().toLocaleString()]);
+
+      const token = jwt.sign(
+        { id: this.lastID, username, role: finalRole },
+        JWT_SECRET,
+        { expiresIn: "7d" }
+      );
+
+      await logToSheet([
+        "REGISTER",
+        username,
+        email,
+        finalRole,
+        new Date().toLocaleString(),
+      ]);
+
       res.json({ success: true, token });
     }
   );
@@ -289,67 +232,166 @@ app.post("/auth/register", async (req, res) => {
 
 app.post("/auth/login", (req, res) => {
   const { username, password } = req.body;
+
   db.get("SELECT * FROM users WHERE username=?", [username], async (err, u) => {
-    if (err || !u) return res.status(400).json({ error: "Invalid credentials" });
+    if (!u) return res.status(400).json({ error: "Invalid credentials" });
+
     const ok = await bcrypt.compare(password, u.password);
     if (!ok) return res.status(400).json({ error: "Invalid credentials" });
-    const t = jwt.sign({ id: u.id, username, role: u.role }, JWT_SECRET, {
-      expiresIn: "7d",
-    });
-    await logToSheet(["LOGIN", username, u.role, new Date().toLocaleString()], "Logins!A1");
-    res.json({ success: true, token: t });
+
+    const token = jwt.sign(
+      { id: u.id, username: u.username, role: u.role },
+      JWT_SECRET,
+      { expiresIn: "7d" }
+    );
+
+    await logToSheet(["LOGIN", username, u.role, new Date().toLocaleString()]);
+
+    res.json({ success: true, token });
   });
 });
 
-// 🛰️ Device tracking
-app.post("/report-device", (req, res) => {
-  const { user_id, device_type, imei, reporter_email } = req.body;
+// ----------------------------
+// 🔟 DEVICE REPORTING
+// ----------------------------
+app.post("/report-device", requireAuth, (req, res) => {
+  const {
+    device_type,
+    imei,
+    color,
+    location_area,
+    lost_type,
+    lost_datetime,
+    reporter_email,
+    google_account_email,
+    apple_id_email,
+    contact_hint,
+  } = req.body;
+
   db.run(
-    "INSERT INTO devices (user_id,device_type,imei,reporter_email) VALUES (?,?,?,?)",
-    [user_id || null, device_type || null, imei || null, reporter_email || null],
+    `INSERT INTO devices (
+      user_id, device_type, imei, color, location_area,
+      lost_type, lost_datetime, reporter_email,
+      google_account_email, apple_id_email, contact_hint
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+    [
+      req.user.id,
+      device_type,
+      imei,
+      color,
+      location_area,
+      lost_type,
+      lost_datetime,
+      reporter_email,
+      google_account_email,
+      apple_id_email,
+      contact_hint,
+    ],
     async function (err) {
-      if (err) return res.status(500).json({ error: "Failed" });
-      await logToSheet(["REPORT", imei, device_type, reporter_email, new Date().toLocaleString()]);
+      if (err) return res.status(500).json({ error: "Failed to save" });
+
+      await logToSheet([
+        "REPORT",
+        imei,
+        device_type,
+        reporter_email,
+        new Date().toLocaleString(),
+      ]);
+
       res.json({ success: true, id: this.lastID });
     }
   );
 });
 
+// ----------------------------
+// 1️⃣1️⃣ LIVE TRACKING (Socket.IO)
+// ----------------------------
 app.post("/track-device", async (req, res) => {
   const { imei, latitude, longitude, address, trackerName } = req.body;
+
   db.run(
-    "INSERT INTO tracking (imei,latitude,longitude,address,trackerName,trackedAt) VALUES (?,?,?,?,?,datetime('now'))",
-    [imei, latitude, longitude, address, trackerName],
+    `INSERT INTO tracking
+     (imei, latitude, longitude, address, trackerName, trackedAt)
+     VALUES (?,?,?,?,?,?)`,
+    [imei, latitude, longitude, address, trackerName, new Date().toISOString()],
     async (err) => {
       if (err) return res.status(500).json({ error: err.message });
-      io.emit("tracking_update", { imei, latitude, longitude, address, trackerName });
-      await logToSheet(["TRACK", imei, latitude, longitude, address, new Date().toLocaleString()]);
+
+      io.emit("tracking_update", {
+        imei,
+        latitude,
+        longitude,
+        address,
+        trackerName,
+      });
+
+      await logToSheet([
+        "TRACK",
+        imei,
+        latitude,
+        longitude,
+        address,
+        new Date().toLocaleString(),
+      ]);
+
       res.json({ success: true });
     }
   );
 });
 
-// 📰 Admin News Feed
-app.get("/admin/news", async (req, res) => {
-  db.all(
-    `SELECT title,url,source,summary,published_at
-     FROM cyber_intel
-     ORDER BY COALESCE(published_at, created_at) DESC
-     LIMIT 20`,
-    [],
-    (err, rows) => {
-      if (err) return res.status(500).json({ error: err.message });
-      res.json({ updated: new Date().toISOString(), articles: rows });
-    }
-  );
+// ----------------------------
+// 1️⃣2️⃣ AI MATCHING (IMEI + phone + emails)
+// ----------------------------
+app.post("/pasearch-ai/match", requireAuth, (req, res) => {
+  const {
+    imei,
+    google_account_email,
+    apple_id_email,
+    owner_phone,
+  } = req.body;
+
+  db.all(`SELECT * FROM devices`, [], (err, rows) => {
+    if (err) return res.status(500).json({ error: err.message });
+
+    const results = rows
+      .map((d) => {
+        let score = 0;
+
+        if (imei && d.imei === imei) score += 60;
+
+        if (
+          google_account_email &&
+          d.google_account_email &&
+          d.google_account_email.toLowerCase() === google_account_email.toLowerCase()
+        ) score += 40;
+
+        if (
+          apple_id_email &&
+          d.apple_id_email &&
+          d.apple_id_email.toLowerCase() === apple_id_email.toLowerCase()
+        ) score += 40;
+
+        if (
+          owner_phone &&
+          d.contact_hint &&
+          d.contact_hint.includes(owner_phone.substring(3))
+        ) score += 20;
+
+        return { score, device: d };
+      })
+      .filter((m) => m.score > 0)
+      .sort((a, b) => b.score - a.score);
+
+    res.json({ success: true, matches: results });
+  });
 });
 
 // ----------------------------
-// 🔟 Server + Socket.IO
+// 1️⃣3️⃣ SERVER + SOCKET.IO
 // ----------------------------
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
-server.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 PASEARCH Backend running on port ${PORT}`);
-});
+server.listen(PORT, () =>
+  console.log(`🚀 PASEARCH Backend MVP running on port ${PORT}`)
+);
