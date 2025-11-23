@@ -1,0 +1,438 @@
+/* =============================================================
+   🚀 PASEARCH BACKEND (MVP Version)
+   Locate, Track & Recover Devices — IMEI-change resilient
+   Includes:
+   - Authentication (Register / Login)
+   - Device reporting
+   - Live tracking (Socket.IO)
+   - IMEI + Google/Apple email + phone AI-matching
+   - Google Sheets logging
+   - Admin dashboard routes
+   ============================================================= */
+
+require("dotenv").config();
+const express = require("express");
+const cors = require("cors");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const sqlite3 = require("sqlite3").verbose();
+const path = require("path");
+const fs = require("fs");
+const http = require("http");
+const { Server } = require("socket.io");
+const { google } = require("googleapis");
+
+// ----------------------------
+// 1️⃣ CONFIG
+// ----------------------------
+const PORT = process.env.PORT || 5000;
+const DB_PATH = path.join(__dirname, "devices.db");
+const JWT_SECRET = process.env.JWT_SECRET || "dev_secret";
+const FRONTEND_URL =
+  process.env.FRONTEND_URL || "http://localhost:5173";
+
+console.log("🔥 FRONTEND_URL:", FRONTEND_URL);
+
+// ----------------------------
+// 2️⃣ INIT APP
+// ----------------------------
+const app = express();
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true }));
+
+// ----------------------------
+// 3️⃣ CORS
+// ----------------------------
+app.use(
+  cors({
+    origin: (origin, cb) => {
+      if (!origin) return cb(null, true);
+      if (origin === FRONTEND_URL || origin.endsWith(".vercel.app"))
+        return cb(null, true);
+
+      return cb(new Error("CORS blocked"), false);
+    },
+    credentials: true,
+  })
+);
+
+// ----------------------------
+// 4️⃣ SQLITE DB INITIALIZATION
+// ----------------------------
+const db = new sqlite3.Database(DB_PATH, (err) => {
+  if (err) console.error("❌ DB error:", err.message);
+  else console.log("📁 SQLite DB connected.");
+});
+
+
+
+// Tables
+db.serialize(() => {
+  db.run(`CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE,
+    email TEXT UNIQUE,
+    phone TEXT,
+    password TEXT,
+    role TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS devices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    device_type TEXT,
+    imei TEXT,
+    color TEXT,
+    location_area TEXT,
+    lost_type TEXT,
+    lost_datetime TEXT,
+    reporter_email TEXT,
+    police_case_number TEXT,
+    status TEXT DEFAULT 'reported',
+    frozen INTEGER DEFAULT 0,
+    last_seen DATETIME,
+    google_account_email TEXT,
+    apple_id_email TEXT,
+    contact_hint TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS tracking (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    imei TEXT,
+    latitude TEXT,
+    longitude TEXT,
+    address TEXT,
+    trackerName TEXT,
+    trackedAt TEXT
+  )`);
+});
+
+// ============================================
+// 📌 GPS LOCATIONS TABLE (multiple devices)
+// ============================================
+db.run(`
+  CREATE TABLE IF NOT EXISTS device_locations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id INTEGER,
+    lat REAL,
+    lng REAL,
+    accuracy REAL,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(device_id) REFERENCES devices(id)
+  )
+`);
+
+
+// ----------------------------
+// 5️⃣ GOOGLE SHEETS LOGGING
+// ----------------------------
+async function getSheetsClient() {
+  if (!process.env.GOOGLE_SERVICE_ACCOUNT_JSON) return null;
+
+  const creds = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+
+  return new google.auth.GoogleAuth({
+    credentials: creds,
+    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+  });
+}
+
+async function logToSheet(values, range = "Logs!A1") {
+  if (!process.env.GOOGLE_SHEET_ID) return;
+  const auth = await getSheetsClient();
+  if (!auth) return;
+
+  const sheets = google.sheets({ version: "v4", auth });
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: process.env.GOOGLE_SHEET_ID,
+    range,
+    valueInputOption: "USER_ENTERED",
+    requestBody: { values: [values] },
+  });
+}
+
+// ----------------------------
+// 6️⃣ AUTH MIDDLEWARE
+// ----------------------------
+function requireAuth(req, res, next) {
+  const token = req.headers.authorization?.split(" ")[1];
+  if (!token) return res.status(401).json({ error: "No token" });
+
+  try {
+    req.user = jwt.verify(token, JWT_SECRET);
+    next();
+  } catch {
+    res.status(403).json({ error: "Invalid token" });
+  }
+}
+
+// ----------------------------
+// 7️⃣ ADMIN ROUTES
+// ----------------------------
+app.get("/admin/users", requireAuth, (req, res) => {
+  if (req.user.role !== "admin")
+    return res.status(403).json({ error: "Forbidden" });
+
+  db.all(
+    "SELECT id, username, email, role FROM users",
+    [],
+    (err, rows) => {
+      if (err) return res.status(500).json({ error: "DB error" });
+      res.json({ users: rows });
+    }
+  );
+});
+
+app.get("/admin/devices", requireAuth, (req, res) => {
+  if (req.user.role !== "admin")
+    return res.status(403).json({ error: "Forbidden" });
+
+  db.all(
+    "SELECT id, imei, device_type, status, reporter_email FROM devices",
+    [],
+    (err, rows) => {
+      if (err) return res.status(500).json({ error: "DB error" });
+      res.json({ devices: rows });
+    }
+  );
+});
+
+// ----------------------------
+// 8️⃣ HEALTH CHECK
+// ----------------------------
+app.get("/", (req, res) =>
+  res.json({
+    ok: true,
+    service: "PASEARCH Backend MVP",
+    time: new Date().toISOString(),
+  })
+);
+
+// ----------------------------
+// 9️⃣ AUTH ROUTES
+// ----------------------------
+app.post("/auth/register", async (req, res) => {
+  const { username, email, password, role, phone } = req.body;
+
+  if (!username || !email || !password)
+    return res.status(400).json({ error: "Missing fields" });
+
+  const hash = await bcrypt.hash(password, 10);
+  const finalRole = role || "reporter";
+
+  db.run(
+    "INSERT INTO users (username,email,phone,password,role) VALUES (?,?,?,?,?)",
+    [username, email, phone || null, hash, finalRole],
+    async function (err) {
+      if (err) return res.status(400).json({ error: "User exists" });
+
+      const token = jwt.sign(
+        { id: this.lastID, username, role: finalRole },
+        JWT_SECRET,
+        { expiresIn: "7d" }
+      );
+
+      await logToSheet([
+        "REGISTER",
+        username,
+        email,
+        finalRole,
+        new Date().toLocaleString(),
+      ]);
+
+      res.json({ success: true, token });
+    }
+  );
+});
+
+app.post("/auth/login", (req, res) => {
+  const { username, password } = req.body;
+
+  db.get("SELECT * FROM users WHERE username=?", [username], async (err, u) => {
+    if (!u) return res.status(400).json({ error: "Invalid credentials" });
+
+    const ok = await bcrypt.compare(password, u.password);
+    if (!ok) return res.status(400).json({ error: "Invalid credentials" });
+
+    const token = jwt.sign(
+      { id: u.id, username: u.username, role: u.role },
+      JWT_SECRET,
+      { expiresIn: "7d" }
+    );
+
+    await logToSheet(["LOGIN", username, u.role, new Date().toLocaleString()]);
+
+    res.json({ success: true, token });
+  });
+});
+
+// ----------------------------
+// 🔟 DEVICE REPORTING
+// ----------------------------
+app.post("/report-device", requireAuth, (req, res) => {
+  const {
+    device_type,
+    imei,
+    color,
+    location_area,
+    lost_type,
+    lost_datetime,
+    reporter_email,
+    google_account_email,
+    apple_id_email,
+    contact_hint,
+  } = req.body;
+
+  db.run(
+    `INSERT INTO devices (
+      user_id, device_type, imei, color, location_area,
+      lost_type, lost_datetime, reporter_email,
+      google_account_email, apple_id_email, contact_hint
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+    [
+      req.user.id,
+      device_type,
+      imei,
+      color,
+      location_area,
+      lost_type,
+      lost_datetime,
+      reporter_email,
+      google_account_email,
+      apple_id_email,
+      contact_hint,
+    ],
+    async function (err) {
+      if (err) return res.status(500).json({ error: "Failed to save" });
+
+      await logToSheet([
+        "REPORT",
+        imei,
+        device_type,
+        reporter_email,
+        new Date().toLocaleString(),
+      ]);
+
+      res.json({ success: true, id: this.lastID });
+    }
+  );
+});
+
+// =====================
+// POLICE: Get all reports (optional filter)
+// =====================
+app.get("/police/reports", verifyToken, (req, res) => {
+  const { type } = req.query; // phone / laptop / tv / all
+
+  let sql = "SELECT * FROM reports ORDER BY id DESC LIMIT 50";
+
+  if (type && type !== "all") {
+    sql = `SELECT * FROM reports WHERE device_type = ? ORDER BY id DESC LIMIT 50`;
+    return db.all(sql, [type], (err, rows) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json(rows);
+    });
+  }
+
+  db.all(sql, [], (err, rows) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json(rows);
+  });
+});
+
+
+// ----------------------------
+// 1️⃣1️⃣ LIVE TRACKING (Socket.IO)
+// ----------------------------
+app.post("/track-device", async (req, res) => {
+  const { imei, latitude, longitude, address, trackerName } = req.body;
+
+  db.run(
+    `INSERT INTO tracking
+     (imei, latitude, longitude, address, trackerName, trackedAt)
+     VALUES (?,?,?,?,?,?)`,
+    [imei, latitude, longitude, address, trackerName, new Date().toISOString()],
+    async (err) => {
+      if (err) return res.status(500).json({ error: err.message });
+
+      io.emit("tracking_update", {
+        imei,
+        latitude,
+        longitude,
+        address,
+        trackerName,
+      });
+
+      await logToSheet([
+        "TRACK",
+        imei,
+        latitude,
+        longitude,
+        address,
+        new Date().toLocaleString(),
+      ]);
+
+      res.json({ success: true });
+    }
+  );
+});
+
+// ----------------------------
+// 1️⃣2️⃣ AI MATCHING (IMEI + phone + emails)
+// ----------------------------
+app.post("/pasearch-ai/match", requireAuth, (req, res) => {
+  const {
+    imei,
+    google_account_email,
+    apple_id_email,
+    owner_phone,
+  } = req.body;
+
+  db.all(`SELECT * FROM devices`, [], (err, rows) => {
+    if (err) return res.status(500).json({ error: err.message });
+
+    const results = rows
+      .map((d) => {
+        let score = 0;
+
+        if (imei && d.imei === imei) score += 60;
+
+        if (
+          google_account_email &&
+          d.google_account_email &&
+          d.google_account_email.toLowerCase() === google_account_email.toLowerCase()
+        ) score += 40;
+
+        if (
+          apple_id_email &&
+          d.apple_id_email &&
+          d.apple_id_email.toLowerCase() === apple_id_email.toLowerCase()
+        ) score += 40;
+
+        if (
+          owner_phone &&
+          d.contact_hint &&
+          d.contact_hint.includes(owner_phone.substring(3))
+        ) score += 20;
+
+        return { score, device: d };
+      })
+      .filter((m) => m.score > 0)
+      .sort((a, b) => b.score - a.score);
+
+    res.json({ success: true, matches: results });
+  });
+});
+
+// ----------------------------
+// 1️⃣3️⃣ SERVER + SOCKET.IO
+// ----------------------------
+const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: "*" } });
+
+server.listen(PORT, () =>
+  console.log(`🚀 PASEARCH Backend MVP running on port ${PORT}`)
+);
