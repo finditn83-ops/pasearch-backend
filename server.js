@@ -26,17 +26,22 @@ const FRONTEND_URL = process.env.FRONTEND_URL?.trim() || "http://localhost:5173"
 
 // ---------------- Express ----------------
 const app = express();
+
+// Middleware for parsing JSON
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
+
+// ---------------- CORS FIX ----------------
+const cors = require("cors");
+
 app.use(
   cors({
-    origin: function (origin, callback) {
-      if (!origin || origin === FRONTEND_URL) callback(null, true);
-      else callback(new Error("Not allowed by CORS"));
-    },
-    credentials: true,
+    origin: "*", // Allow all origins (best for fixing failed admin data)
+    methods: ["GET", "POST", "PUT", "DELETE"],
+    allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
+
 
 // ---------------- SQLite ----------------
 const db = new sqlite3.Database(DB_PATH, (err) => {
